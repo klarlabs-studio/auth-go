@@ -1,17 +1,24 @@
+# Thin caller for the shared klarlabs-studio Go CI bar.
+# Gate logic (fmt, golangci-lint+gocritic, race+coverctl, nox) lives in the
+# reusable workflow — bump versions there, once, org-wide.
 name: CI
+
 on:
   push:
     branches: [main]
+    paths-ignore: ["**.md", "docs/**", "LICENSE"]
   pull_request:
-permissions:
-  contents: read
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**", "LICENSE"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.25'
-      - run: go vet ./...
-      - run: go test -race -cover ./...
+  ci:
+    uses: klarlabs-studio/.github/.github/workflows/go-ci.yml@main
+    permissions:
+      contents: read
+      security-events: write
+    secrets: inherit

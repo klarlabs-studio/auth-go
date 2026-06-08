@@ -1,0 +1,306 @@
+package domain_test
+
+import (
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/klarlabs-studio/auth-go/adapters/memory"
+	"github.com/klarlabs-studio/auth-go/domain"
+)
+
+func fixedClock(t *time.Time) domain.Clock { return func() time.Time { return *t } }
+
+func mustUserID(t *testing.T, s string) domain.UserID {
+	t.Helper()
+	id, err := domain.NewUserID(s)
+	if err != nil {
+		t.Fatalf("NewUserID(%q): %v", s, err)
+	}
+	return id
+}
+
+func mustTenantID(t *testing.T, s string) domain.TenantID {
+	t.Helper()
+	id, err := domain.NewTenantID(s)
+	if err != nil {
+		t.Fatalf("NewTenantID(%q): %v", s, err)
+	}
+	return id
+}
+
+func mustEmail(t *testing.T, s string) domain.Email {
+	t.Helper()
+	e, err := domain.NewEmail(s)
+	if err != nil {
+		t.Fatalf("NewEmail(%q): %v", s, err)
+	}
+	return e
+}
+
+// ── Value objects ───────────────────────────────────────────
+
+func TestUserID_Validation(t *testing.T) {
+	if _, err := domain.NewUserID(""); !errors.Is(err, domain.ErrInvalidUserID) {
+		t.Fatalf("empty: want ErrInvalidUserID, got %v", err)
+	}
+	if _, err := domain.NewUserID("  "); !errors.Is(err, domain.ErrInvalidUserID) {
+		t.Fatalf("blank: want ErrInvalidUserID, got %v", err)
+	}
+	id := mustUserID(t, "u1")
+	if id.String() != "u1" || id.IsZero() {
+		t.Fatalf("unexpected: %+v", id)
+	}
+}
+
+func TestEmail_Normalization(t *testing.T) {
+	e := mustEmail(t, "  Felix@Klarlabs.DE ")
+	if e.String() != "felix@klarlabs.de" {
+		t.Fatalf("normalize: got %q", e.String())
+	}
+	for _, bad := range []string{"", "no-at", "a@b", "@b.c", "a@"} {
+		if _, err := domain.NewEmail(bad); !errors.Is(err, domain.ErrInvalidEmail) {
+			t.Fatalf("NewEmail(%q): want ErrInvalidEmail, got %v", bad, err)
+		}
+	}
+}
+
+func TestToken_Random(t *testing.T) {
+	a, _ := domain.NewToken()
+	b, _ := domain.NewToken()
+	if a.String() == b.String() || a.String() == "" {
+		t.Fatal("tokens not random/non-empty")
+	}
+	if _, err := domain.TokenFromString(""); !errors.Is(err, domain.ErrInvalidToken) {
+		t.Fatalf("empty token: want ErrInvalidToken, got %v", err)
+	}
+}
+
+// ── Password ────────────────────────────────────────────────
+
+func TestPasswordHash_VerifyAndFormat(t *testing.T) {
+	h, err := domain.HashPassword("correct horse battery staple", domain.DefaultArgon2idParams())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Verify("correct horse battery staple"); err != nil {
+		t.Fatalf("verify good: %v", err)
+	}
+	if err := h.Verify("wrong"); !errors.Is(err, domain.ErrPasswordMismatch) {
+		t.Fatalf("verify bad: want mismatch, got %v", err)
+	}
+	// rehydrate
+	rt, err := domain.PasswordHashFromString(h.String())
+	if err != nil {
+		t.Fatalf("rehydrate: %v", err)
+	}
+	if err := rt.Verify("correct horse battery staple"); err != nil {
+		t.Fatalf("rehydrated verify: %v", err)
+	}
+	if _, err := domain.PasswordHashFromString("garbage"); !errors.Is(err, domain.ErrInvalidHash) {
+		t.Fatalf("bad format: want ErrInvalidHash, got %v", err)
+	}
+}
+
+func TestPasswordHash_SaltUniqueness(t *testing.T) {
+	p := domain.DefaultArgon2idParams()
+	h1, _ := domain.HashPassword("same", p)
+	h2, _ := domain.HashPassword("same", p)
+	if h1.String() == h2.String() {
+		t.Fatal("salt not random")
+	}
+}
+
+// ── TOTP ────────────────────────────────────────────────────
+
+func TestTOTP_RFC6238Vector(t *testing.T) {
+	secret, err := domain.TOTPSecretFromString("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := domain.TOTPConfig{Period: 30, Digits: 6, Skew: 0}
+	code, err := cfg.Generate(secret, time.Unix(59, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != "287082" {
+		t.Fatalf("RFC6238 vector: want 287082, got %s", code)
+	}
+}
+
+func TestTOTP_RoundTripAndSkew(t *testing.T) {
+	cfg := domain.DefaultTOTPConfig("Klarlabs")
+	secret, _ := domain.NewTOTPSecret()
+	at := time.Date(2026, 6, 8, 12, 0, 30, 0, time.UTC)
+	code, _ := cfg.Generate(secret, at)
+	if err := cfg.Validate(secret, code, at); err != nil {
+		t.Fatalf("same step: %v", err)
+	}
+	prev, _ := cfg.Generate(secret, at.Add(-30*time.Second))
+	if err := cfg.Validate(secret, prev, at); err != nil {
+		t.Fatalf("prev step with skew=1: %v", err)
+	}
+	old, _ := cfg.Generate(secret, at.Add(-90*time.Second))
+	if err := cfg.Validate(secret, old, at); !errors.Is(err, domain.ErrInvalidTOTP) {
+		t.Fatalf("beyond skew: want ErrInvalidTOTP, got %v", err)
+	}
+}
+
+func TestTOTP_SecretValidationAndURI(t *testing.T) {
+	if _, err := domain.TOTPSecretFromString("1"); !errors.Is(err, domain.ErrInvalidSecret) {
+		t.Fatalf("bad secret: want ErrInvalidSecret, got %v", err)
+	}
+	cfg := domain.DefaultTOTPConfig("Klarlabs")
+	secret, _ := domain.NewTOTPSecret()
+	uri := cfg.ProvisioningURI(secret, "felix@klarlabs.de")
+	for _, want := range []string{"otpauth://totp/", "issuer=Klarlabs", "secret="} {
+		if !strings.Contains(uri, want) {
+			t.Fatalf("URI %q missing %q", uri, want)
+		}
+	}
+}
+
+// ── Session service ─────────────────────────────────────────
+
+func TestSessionService_Lifecycle(t *testing.T) {
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	repo := memory.NewSessionRepo()
+	svc := domain.NewSessionService(repo, time.Hour, fixedClock(&now))
+
+	s, err := svc.Issue(mustUserID(t, "u1"), mustTenantID(t, "t1"))
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+	if s.UserID().String() != "u1" || s.TenantID().String() != "t1" {
+		t.Fatalf("unexpected session: %+v", s.Snapshot())
+	}
+	got, err := svc.Validate(s.Token())
+	if err != nil || got.UserID().String() != "u1" {
+		t.Fatalf("validate: %v / %+v", err, got.Snapshot())
+	}
+
+	// expiry purges
+	now = now.Add(2 * time.Hour)
+	if _, err := svc.Validate(s.Token()); !errors.Is(err, domain.ErrExpired) {
+		t.Fatalf("want ErrExpired, got %v", err)
+	}
+	if _, err := repo.FindByToken(s.Token()); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("expired not purged: %v", err)
+	}
+}
+
+func TestSessionService_RevokeAll(t *testing.T) {
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	svc := domain.NewSessionService(memory.NewSessionRepo(), time.Hour, fixedClock(&now))
+	u := mustUserID(t, "u")
+	tn := mustTenantID(t, "t")
+	s1, _ := svc.Issue(u, tn)
+	s2, _ := svc.Issue(u, tn)
+	other, _ := svc.Issue(mustUserID(t, "other"), tn)
+
+	if err := svc.RevokeAll(u); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Validate(s1.Token()); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatal("s1 survived revoke-all")
+	}
+	if _, err := svc.Validate(s2.Token()); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatal("s2 survived revoke-all")
+	}
+	if _, err := svc.Validate(other.Token()); err != nil {
+		t.Fatalf("revoke-all hit another user: %v", err)
+	}
+}
+
+func TestSessionService_RejectsZeroIDs(t *testing.T) {
+	svc := domain.NewSessionService(memory.NewSessionRepo(), time.Hour, nil)
+	if _, err := svc.Issue(domain.UserID{}, mustTenantID(t, "t")); !errors.Is(err, domain.ErrInvalidUserID) {
+		t.Fatalf("want ErrInvalidUserID, got %v", err)
+	}
+	if _, err := svc.Issue(mustUserID(t, "u"), domain.TenantID{}); !errors.Is(err, domain.ErrInvalidTenantID) {
+		t.Fatalf("want ErrInvalidTenantID, got %v", err)
+	}
+}
+
+// ── Magic link service ──────────────────────────────────────
+
+func TestMagicLinkService_SingleUse(t *testing.T) {
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	repo := memory.NewMagicLinkRepo()
+	svc := domain.NewMagicLinkService(repo, 15*time.Minute, fixedClock(&now))
+
+	raw, err := svc.Issue(mustEmail(t, "felix@klarlabs.de"), mustTenantID(t, "t1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// raw token is not the storage key
+	if _, err := repo.FindByHash(raw.String()); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatal("raw token used as key — must be hashed")
+	}
+	link, err := svc.Consume(raw)
+	if err != nil {
+		t.Fatalf("consume: %v", err)
+	}
+	if link.Email().String() != "felix@klarlabs.de" {
+		t.Fatalf("unexpected link: %+v", link.Snapshot())
+	}
+	if _, err := svc.Consume(raw); !errors.Is(err, domain.ErrConsumed) {
+		t.Fatalf("reuse: want ErrConsumed, got %v", err)
+	}
+}
+
+func TestMagicLinkService_Expiry(t *testing.T) {
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	svc := domain.NewMagicLinkService(memory.NewMagicLinkRepo(), 15*time.Minute, fixedClock(&now))
+	raw, _ := svc.Issue(mustEmail(t, "a@b.co"), mustTenantID(t, "t"))
+	now = now.Add(16 * time.Minute)
+	if _, err := svc.Consume(raw); !errors.Is(err, domain.ErrExpired) {
+		t.Fatalf("want ErrExpired, got %v", err)
+	}
+}
+
+func TestMagicLinkService_UnknownAndZeroTenant(t *testing.T) {
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	svc := domain.NewMagicLinkService(memory.NewMagicLinkRepo(), 15*time.Minute, fixedClock(&now))
+	if _, err := svc.Consume(domain.Token{}); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("unknown: want ErrNotFound, got %v", err)
+	}
+	if _, err := svc.Issue(mustEmail(t, "a@b.co"), domain.TenantID{}); !errors.Is(err, domain.ErrInvalidTenantID) {
+		t.Fatalf("zero tenant: want ErrInvalidTenantID, got %v", err)
+	}
+}
+
+// ── Passkey repo (memory adapter) ───────────────────────────
+
+func TestPasskeyRepo(t *testing.T) {
+	repo := memory.NewPasskeyRepo()
+	u := mustUserID(t, "u1")
+	if err := repo.Add(domain.PasskeyCredential{ID: []byte{1, 2, 3}, UserID: u, Name: "Key"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Add(domain.PasskeyCredential{ID: []byte{4}, UserID: mustUserID(t, "other")}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := repo.ListByUser(u)
+	if len(got) != 1 || got[0].Name != "Key" {
+		t.Fatalf("listbyuser: %+v", got)
+	}
+	if err := repo.UpdateSignCount([]byte{1, 2, 3}, 42); err != nil {
+		t.Fatal(err)
+	}
+	again, _ := repo.ListByUser(u)
+	if again[0].SignCount != 42 {
+		t.Fatalf("sign count: %d", again[0].SignCount)
+	}
+	if err := repo.UpdateSignCount([]byte{9}, 1); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("unknown: want ErrNotFound, got %v", err)
+	}
+	if err := repo.Delete([]byte{1, 2, 3}); err != nil {
+		t.Fatal(err)
+	}
+	final, _ := repo.ListByUser(u)
+	if len(final) != 0 {
+		t.Fatalf("delete failed: %+v", final)
+	}
+}

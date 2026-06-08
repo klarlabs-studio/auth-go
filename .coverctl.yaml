@@ -1,0 +1,28 @@
+version: 1
+
+policy:
+  default:
+    min: 75
+  domains:
+    # Core auth domain — entities, value objects, services. High bar.
+    - name: domain
+      match:
+        - ./domain/...
+      min: 80
+    # In-memory adapters — fully unit-tested.
+    - name: memory
+      match:
+        - ./adapters/memory/...
+      min: 85
+    # WebAuthn adapter — ceremonies need a real browser/authenticator; only
+    # wiring + option generation is unit-testable.
+    - name: webauthn
+      match:
+        - ./adapters/webauthn/...
+      min: 10
+    # Postgres adapter — integration-gated on TEST_DATABASE_URL; skips without
+    # a database service, so CI coverage is the compile-time port assertions.
+    - name: pgstore
+      match:
+        - ./adapters/pgstore/...
+      min: 0

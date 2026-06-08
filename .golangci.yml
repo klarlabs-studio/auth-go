@@ -1,0 +1,44 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - misspell
+    - unconvert
+    - unparam
+    - gocritic
+    - gocyclo
+    - gosec
+    - dupl
+  settings:
+    gosec:
+      # G115 fires on every int -> int32 narrowing, even when source is
+      # config-bounded (clamped in setDefaults). Adaptive limiter uses
+      # atomic.Int32 mirrors as a deliberate hot-path design.
+      excludes:
+        - G115
+  exclusions:
+    rules:
+      # Preset chains intentionally share structure (CB -> Retry -> Timeout)
+      # across HTTPClient / DatabaseQuery / RPCDownstream. Tuning differs;
+      # extracting a shared helper would obscure each preset's intent.
+      - path: middleware/presets\.go
+        linters:
+          - dupl
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
