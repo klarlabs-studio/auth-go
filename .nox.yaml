@@ -26,3 +26,9 @@ scan:
     - "release-artifacts/"
     # Parameterized SQL schema (DDL), not application code.
     - "adapters/pgstore/schema.sql"
+
+# Activate nox code-level taint SAST (source-to-sink: SSRF, injection,
+# path traversal). nox scan auto-installs (cosign-verified) + runs it.
+plugins:
+  required:
+    - nox/taint-analysis
