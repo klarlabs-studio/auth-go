@@ -221,3 +221,38 @@ func contains(s, sub string) bool {
 	}
 	return false
 }
+
+func TestMemoryPasskeyStore(t *testing.T) {
+	s := NewMemoryPasskeyStore()
+	c := PasskeyCredential{ID: []byte{1, 2, 3}, UserID: "u1", PublicKey: []byte{9}, SignCount: 0, Name: "Key"}
+	if err := s.Add(c); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Add(PasskeyCredential{ID: []byte{4}, UserID: "other"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ListByUser("u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Name != "Key" {
+		t.Fatalf("listbyuser: %+v", got)
+	}
+	if err := s.UpdateSignCount([]byte{1, 2, 3}, 42); err != nil {
+		t.Fatal(err)
+	}
+	again, _ := s.ListByUser("u1")
+	if again[0].SignCount != 42 {
+		t.Fatalf("sign count not updated: %d", again[0].SignCount)
+	}
+	if err := s.UpdateSignCount([]byte{0}, 1); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+	if err := s.Delete([]byte{1, 2, 3}); err != nil {
+		t.Fatal(err)
+	}
+	final, _ := s.ListByUser("u1")
+	if len(final) != 0 {
+		t.Fatalf("delete failed: %+v", final)
+	}
+}
