@@ -156,9 +156,48 @@ func (r *PasskeyRepo) Delete(id []byte) error {
 	return nil
 }
 
+// LoginAttemptRepo is an in-memory domain.LoginAttemptStore.
+type LoginAttemptRepo struct {
+	mu sync.RWMutex
+	m  map[string]domain.LoginAttemptSnapshot
+}
+
+// NewLoginAttemptRepo returns an empty login-attempt store.
+func NewLoginAttemptRepo() *LoginAttemptRepo {
+	return &LoginAttemptRepo{m: make(map[string]domain.LoginAttemptSnapshot)}
+}
+
+// Get returns the snapshot for a key or domain.ErrNotFound.
+func (r *LoginAttemptRepo) Get(key string) (domain.LoginAttemptSnapshot, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	snap, ok := r.m[key]
+	if !ok {
+		return domain.LoginAttemptSnapshot{}, domain.ErrNotFound
+	}
+	return snap, nil
+}
+
+// Save upserts the snapshot.
+func (r *LoginAttemptRepo) Save(s domain.LoginAttemptSnapshot) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.m[s.Key] = s
+	return nil
+}
+
+// Delete removes a key's state.
+func (r *LoginAttemptRepo) Delete(key string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.m, key)
+	return nil
+}
+
 // Port assertions.
 var (
 	_ domain.SessionRepository   = (*SessionRepo)(nil)
 	_ domain.MagicLinkRepository = (*MagicLinkRepo)(nil)
 	_ domain.PasskeyRepository   = (*PasskeyRepo)(nil)
+	_ domain.LoginAttemptStore   = (*LoginAttemptRepo)(nil)
 )

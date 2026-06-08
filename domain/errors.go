@@ -16,6 +16,11 @@ var (
 	ErrPasswordMismatch = errors.New("authgo: password mismatch")
 	ErrInvalidTOTP      = errors.New("authgo: invalid TOTP code")
 
+	// Lockout errors.
+	ErrAccountLocked     = errors.New("authgo: account locked")
+	ErrInvalidLockoutCfg = errors.New("authgo: invalid lockout policy")
+	ErrInvalidLockoutKey = errors.New("authgo: invalid lockout key")
+
 	// Value-object validation errors.
 	ErrInvalidUserID   = errors.New("authgo: invalid user id")
 	ErrInvalidTenantID = errors.New("authgo: invalid tenant id")
