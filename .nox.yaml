@@ -1,15 +1,28 @@
 scan:
   exclude:
-    # Baseline fingerprints are SHA-256 hex — match entropy-based secret rules.
+    # Baseline file: contains high-entropy fingerprint hashes (SHA-256 hex)
+    # that match the SEC-680 "Prometheus API key" regex; these ARE the
+    # finding fingerprints, not actual secrets.
     - ".nox/baseline.json"
-    # Module digests look like API keys to entropy detectors.
+    # go.sum: module digests look like API keys to entropy-based detectors.
     - "go.sum"
     - "**/go.sum"
-    # Pinned SHAs + token references in workflows trip secret patterns.
+    # CI workflows: pinned commit SHAs + GITHUB_TOKEN references look like
+    # secret patterns to entropy-based rules.
     - ".github/workflows/*.yml"
-    # Docs carry example snippets / env-var names that secret heuristics flag.
+    # Documentation contains example code snippets and curl commands with
+    # placeholder tokens / API keys.
     - "README.md"
-    - "**/README.md"
+    - "CHANGELOG.md"
     - "docs/*.md"
-    # SQL schema (parameterized DDL) — not application code.
+    - "**/README.md"
+    # Generated coverage badge.
+    - "assets/coverage-badge.svg"
+    # Grafana dashboard JSON contains Prometheus query expressions that
+    # match SEC-680 against `prometheus_*_total` metric names.
+    - "assets/grafana/*.json"
+    # Generated artifacts.
+    - "nox-out/"
+    - "release-artifacts/"
+    # Parameterized SQL schema (DDL), not application code.
     - "adapters/pgstore/schema.sql"
