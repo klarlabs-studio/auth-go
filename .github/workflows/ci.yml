@@ -1,6 +1,3 @@
-# Thin caller for the shared klarlabs-studio Go CI bar.
-# Gate logic (fmt, golangci-lint+gocritic, race+coverctl, nox) lives in the
-# reusable workflow — bump versions there, once, org-wide.
 name: CI
 
 on:
@@ -21,4 +18,7 @@ jobs:
     permissions:
       contents: read
       security-events: write
+      pull-requests: write
     secrets: inherit
+    with:
+      cross-platform: false   # pure-logic lib; ubuntu is sufficient
