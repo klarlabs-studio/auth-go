@@ -16,15 +16,7 @@ linters:
     - unparam
     - gocritic
     - gocyclo
-    - gosec
     - dupl
-  settings:
-    gosec:
-      # G115 fires on every int -> int32 narrowing, even when source is
-      # config-bounded (clamped in setDefaults). Adaptive limiter uses
-      # atomic.Int32 mirrors as a deliberate hot-path design.
-      excludes:
-        - G115
   exclusions:
     rules:
       # Preset chains intentionally share structure (CB -> Retry -> Timeout)
