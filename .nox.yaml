@@ -1,0 +1,15 @@
+scan:
+  exclude:
+    # Baseline fingerprints are SHA-256 hex — match entropy-based secret rules.
+    - ".nox/baseline.json"
+    # Module digests look like API keys to entropy detectors.
+    - "go.sum"
+    - "**/go.sum"
+    # Pinned SHAs + token references in workflows trip secret patterns.
+    - ".github/workflows/*.yml"
+    # Docs carry example snippets / env-var names that secret heuristics flag.
+    - "README.md"
+    - "**/README.md"
+    - "docs/*.md"
+    # SQL schema (parameterized DDL) — not application code.
+    - "adapters/pgstore/schema.sql"
