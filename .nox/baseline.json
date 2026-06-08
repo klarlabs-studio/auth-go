@@ -1,37 +1,4 @@
 {
   "schema_version": "1.0.0",
-  "entries": [
-    {
-      "fingerprint": "7cc69525cf42309a438cdac4fb46c8ef3324d33bd2ebb06943a8320c31bf9fd5",
-      "rule_id": "AI-049",
-      "file_path": "adapters/pgstore/pgstore.go",
-      "severity": "high",
-      "reason": "False positive: AI-049 pattern-matches database/sql .Exec as eval/exec. These are parameterized SQL ($1,$2 + args), no AI output, no injection. Line 19 is the DB interface decl; line 68 is a DELETE with a bound param.",
-      "created_at": "2026-06-08T10:42:51.115209Z"
-    },
-    {
-      "fingerprint": "d4ecaaaf5e5ba55e649843bd71ad75a785e52354245103d826b414e089743b2c",
-      "rule_id": "AI-049",
-      "file_path": "adapters/pgstore/pgstore.go",
-      "severity": "high",
-      "reason": "False positive: AI-049 pattern-matches database/sql .Exec as eval/exec. These are parameterized SQL ($1,$2 + args), no AI output, no injection. Line 19 is the DB interface decl; line 68 is a DELETE with a bound param.",
-      "created_at": "2026-06-08T10:42:51.115209Z"
-    },
-    {
-      "fingerprint": "c4a89a0b52bf8b7bc65000ea9f61e29d8b2b3ccd6bbffe0f1581f13ac1a81fee",
-      "rule_id": "VULN-001",
-      "file_path": "go.sum",
-      "severity": "medium",
-      "reason": "Resolved: yaml.v3 bumped to v3.0.1 (patched). go list -m confirms effective v3.0.1; govulncheck reports no yaml vuln. nox matches a stale historical /go.mod line left in go.sum, not the selected version.",
-      "created_at": "2026-06-08T10:44:58.225535Z"
-    },
-    {
-      "fingerprint": "2b0a0a7cd749cc4ce8d4cea8f929cc785d15986ef73143527c764d1b05662894",
-      "rule_id": "VULN-001",
-      "file_path": "go.sum",
-      "severity": "medium",
-      "reason": "Resolved: yaml.v3 bumped to v3.0.1 (patched). go list -m confirms effective v3.0.1; govulncheck reports no yaml vuln. nox matches a stale historical /go.mod line left in go.sum, not the selected version.",
-      "created_at": "2026-06-08T10:44:58.225535Z"
-    }
-  ]
+  "entries": []
 }

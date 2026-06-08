@@ -22,3 +22,4 @@ jobs:
     secrets: inherit
     with:
       cross-platform: false   # pure-logic lib; ubuntu is sufficient
+      nox-strict: true        # repo is clean of high/critical — enforce, don't just report
