@@ -1,17 +1,28 @@
+# Thin caller for the shared klarlabs-studio Go CI bar.
+# All gate logic lives in the reusable workflow — bump versions / add jobs
+# there, once, org-wide.
 name: CI
+
 on:
   push:
     branches: [main]
+    paths-ignore: ["**.md", "docs/**", "LICENSE"]
   pull_request:
-permissions:
-  contents: read
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**", "LICENSE"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.25'
-      - run: go vet ./...
-      - run: go test -race -cover ./...
+  ci:
+    uses: klarlabs-studio/.github/.github/workflows/go-ci.yml@main
+    permissions:
+      contents: read
+      security-events: write
+      pull-requests: write
+    secrets: inherit
+    with:
+      coverage: false        # no coverage threshold yet — follow-up
+      cross-platform: false  # pure Go lib — ubuntu only
