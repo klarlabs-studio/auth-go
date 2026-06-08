@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 
 	"golang.org/x/crypto/argon2"
@@ -58,6 +59,7 @@ func VerifyPassword(password, encoded string) error {
 	if err != nil {
 		return err
 	}
+	//nolint:gosec // G115: decodePHC bounds len(hash) to (0, math.MaxUint32], so this conversion is always in range.
 	other := argon2.IDKey([]byte(password), salt, params.Iterations, params.Memory, params.Parallelism, uint32(len(hash)))
 	if subtle.ConstantTimeCompare(hash, other) != 1 {
 		return ErrPasswordMismatch
@@ -87,6 +89,12 @@ func decodePHC(encoded string) (Argon2idParams, []byte, []byte, error) {
 	hash, err := b64.DecodeString(parts[5])
 	if err != nil {
 		return Argon2idParams{}, nil, nil, errors.New("authgo: invalid hash encoding")
+	}
+	// The hash length is the argon2 key length, re-supplied as a uint32 when
+	// re-deriving in VerifyPassword. Reject empty or absurdly large hashes so
+	// that conversion is always in range and malformed input is rejected early.
+	if len(hash) == 0 || len(hash) > math.MaxUint32 {
+		return Argon2idParams{}, nil, nil, errors.New("authgo: invalid hash length")
 	}
 	return p, salt, hash, nil
 }

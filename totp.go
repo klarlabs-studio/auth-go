@@ -3,7 +3,7 @@ package authgo
 import (
 	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha1"
+	"crypto/sha1" //nolint:gosec // G505: RFC 6238 TOTP mandates HMAC-SHA1 for authenticator-app interoperability (Google Authenticator, Authy, etc.); HMAC-SHA1 is unaffected by SHA-1 collision weaknesses.
 	"crypto/subtle"
 	"encoding/base32"
 	"encoding/binary"
@@ -65,18 +65,33 @@ func (c TOTPConfig) digits() int {
 	return c.Digits
 }
 
+// counter returns the RFC 6238 time-step counter for t. Unix times before the
+// epoch are clamped to 0 — TOTP is only meaningful for present-day timestamps.
+func (c TOTPConfig) counter(t time.Time) uint64 {
+	secs := t.Unix()
+	if secs < 0 {
+		secs = 0
+	}
+	//nolint:gosec // G115: secs is guarded non-negative above, so the int64->uint64 conversion cannot overflow.
+	return uint64(secs) / uint64(c.period())
+}
+
 // Generate returns the TOTP code for a secret at time t.
 func (c TOTPConfig) Generate(secret string, t time.Time) (string, error) {
-	counter := uint64(t.Unix()) / uint64(c.period())
-	return c.hotp(secret, counter)
+	return c.hotp(secret, c.counter(t))
 }
 
 // Validate checks code against the secret at time t, allowing ±Skew steps.
 func (c TOTPConfig) Validate(secret, code string, t time.Time) error {
-	counter := int64(uint64(t.Unix()) / uint64(c.period()))
-	skew := int64(c.Skew)
-	for i := -skew; i <= skew; i++ {
-		want, err := c.hotp(secret, uint64(counter+i))
+	counter := c.counter(t)
+	skew := uint64(c.Skew)
+	low := counter - skew
+	if skew > counter {
+		low = 0
+	}
+	high := counter + skew
+	for step := low; step <= high; step++ {
+		want, err := c.hotp(secret, step)
 		if err != nil {
 			return err
 		}
