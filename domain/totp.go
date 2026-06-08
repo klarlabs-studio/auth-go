@@ -3,7 +3,7 @@ package domain
 import (
 	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha1" //nolint:gosec // RFC 6238 mandates HMAC-SHA1 for TOTP; authenticator apps require it.
+	"crypto/sha1"
 	"crypto/subtle"
 	"encoding/base32"
 	"encoding/binary"
