@@ -29,6 +29,10 @@ adapters/
   memory/            in-memory ports — tests + single-node dev
   pgstore/           Postgres ports (database/sql, no driver dep) + schema.sql
   webauthn/          PasskeyAuthenticator over go-webauthn (passkey adapter)
+
+middleware/
+  basicauth.go       BasicAuthMiddleware — inbound HTTP adapter; Basic → session
+                     handshake (stdlib net/http, depends only on the domain)
 ```
 
 Value objects enforce their own invariants in constructors — no anemic models.
@@ -43,6 +47,7 @@ A product wires the repository ports to Postgres and gets every method.
 | TOTP | `domain.TOTPConfig` | RFC 6238, verified against the spec vector, clock-skew window, `otpauth://` URI |
 | Magic link | `domain.MagicLinkService` | single-use, TTL, only the SHA-256 hash stored |
 | Passkeys | `adapters/webauthn` | WebAuthn; kept an adapter so the core carries only `x/crypto` |
+| Basic auth | `middleware.BasicAuthMiddleware` | bootstrap-then-session handshake; `Basic` once, session cookie after — fits browser SPAs |
 
 ## Example
 
@@ -69,6 +74,19 @@ err = cfg.Validate(secret, userCode, time.Now())
 ml := domain.NewMagicLinkService(pgstore.NewMagicLinkRepo(db), 15*time.Minute, nil)
 raw, _ := ml.Issue(emailVO, tid)    // email raw.String(); never stored
 link, err := ml.Consume(raw)        // single-use
+
+// Basic-auth handshake: Authorization: Basic once, session cookie after.
+mw, _ := middleware.NewBasicAuthMiddleware(middleware.BasicAuthConfig{
+    Verifier: middleware.AuthenticatorFunc(func(user, pass string) (domain.UserID, domain.TenantID, error) {
+        // look up the user, verify with PasswordHash.Verify, return the identity
+        return uid, tid, nil // or middleware.ErrInvalidCredentials
+    }),
+    Sessions:   sm,
+    Realm:      "rollops",
+    CookieName: "rollops_ui",
+})
+http.Handle("/ui/", mw.Middleware(uiHandler))
+// downstream: sess, _ := middleware.SessionFromContext(r.Context())
 ```
 
 ## Engineering bar
