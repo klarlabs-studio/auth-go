@@ -125,6 +125,20 @@ func (s *LockoutService) Guard(key string) error {
 // RecordFailure increments the failure counter for a key and applies the lock
 // when the policy threshold is met. It returns true when this call caused the
 // key to transition into a locked state.
+//
+// While a key is within an active lock window this is a no-op: the lock was
+// already decided, so counting further failures (and pushing LockedUntil
+// forward from each new now) would make the lockout unbounded under repeated
+// attempts. Callers should Guard before verifying, so failures during an
+// active lock are not expected, but the no-op keeps the window honestly bounded
+// to Window even if they occur.
+//
+// The Get→Save sequence is not atomic: under concurrent failures for the same
+// key, a lost increment can delay the threshold by an attempt or two. The lock
+// still triggers — the control is not defeated — but stores needing exact
+// counts under high-concurrency attack should serialize per key (e.g. a
+// SELECT … FOR UPDATE adapter). This is an accepted v0.3.0 trade-off of the
+// dumb-store port.
 func (s *LockoutService) RecordFailure(key string) (locked bool, err error) {
 	key, err = normalizeLockoutKey(key)
 	if err != nil {
@@ -139,16 +153,20 @@ func (s *LockoutService) RecordFailure(key string) (locked bool, err error) {
 	}
 
 	now := s.now()
-	// A previously-expired lock starts a fresh count.
-	if !snap.LockedUntil.IsZero() && !now.Before(snap.LockedUntil) {
+	if !snap.LockedUntil.IsZero() {
+		if now.Before(snap.LockedUntil) {
+			// Active lock: leave the window untouched.
+			return false, nil
+		}
+		// A previously-expired lock starts a fresh count.
 		snap.FailureCount = 0
 		snap.LockedUntil = time.Time{}
 	}
 
 	snap.FailureCount++
 	until := s.policy.LockedUntil(snap.FailureCount, now)
-	justLocked := !until.IsZero() && snap.LockedUntil.IsZero()
-	if !until.IsZero() {
+	justLocked := !until.IsZero()
+	if justLocked {
 		snap.LockedUntil = until
 	}
 	if err := s.store.Save(snap); err != nil {
@@ -166,9 +184,13 @@ func (s *LockoutService) Clear(key string) error {
 	return s.store.Delete(key)
 }
 
+// normalizeLockoutKey validates the key without mutating it. The key is
+// caller-chosen and opaque (the port docs recommend a hash of the email), so
+// the service must not lowercase or trim it — doing so could alias distinct
+// case-sensitive identifiers (e.g. base64 or raw hashes). Only blank keys are
+// rejected.
 func normalizeLockoutKey(key string) (string, error) {
-	key = strings.TrimSpace(strings.ToLower(key))
-	if key == "" {
+	if strings.TrimSpace(key) == "" {
 		return "", ErrInvalidLockoutKey
 	}
 	return key, nil

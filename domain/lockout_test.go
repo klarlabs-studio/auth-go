@@ -175,6 +175,56 @@ func TestLockoutService_RejectsEmptyKey(t *testing.T) {
 	}
 }
 
+func TestLockoutService_ActiveLockNotExtended(t *testing.T) {
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	store := memory.NewLoginAttemptRepo()
+	svc := domain.NewLockoutService(store, domain.DefaultLockoutPolicy(), fixedClock(&now))
+	key := "u@x.co"
+
+	for range 5 { // trip the lock at t0
+		_, _ = svc.RecordFailure(key)
+	}
+	lockedAt := now
+
+	// Hammer the key while it is locked. The window must NOT slide forward.
+	for i := range 10 {
+		now = lockedAt.Add(time.Duration(i+1) * time.Minute)
+		justLocked, err := svc.RecordFailure(key)
+		if err != nil {
+			t.Fatalf("attempt during lock: %v", err)
+		}
+		if justLocked {
+			t.Fatalf("RecordFailure reported a new lock transition during an active lock at +%dm", i+1)
+		}
+	}
+
+	// Original window was 15m from lockedAt; after it elapses the lock clears
+	// despite the repeated attempts that would have extended a sliding window.
+	now = lockedAt.Add(15 * time.Minute)
+	if l, _ := svc.IsLocked(key); l {
+		t.Fatal("lock should expire exactly Window after it engaged, not slide forward")
+	}
+}
+
+func TestLockoutService_KeyIsOpaqueAndCaseSensitive(t *testing.T) {
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	store := memory.NewLoginAttemptRepo()
+	svc := domain.NewLockoutService(store, domain.DefaultLockoutPolicy(), fixedClock(&now))
+
+	// Two keys differing only by case must be treated as distinct subjects —
+	// the service must not fold case on opaque keys (e.g. base64 / hashes).
+	upper, lower := "ABCdef", "abcdef"
+	for range 5 {
+		_, _ = svc.RecordFailure(upper)
+	}
+	if l, _ := svc.IsLocked(upper); !l {
+		t.Fatal("upper-case key should be locked")
+	}
+	if l, _ := svc.IsLocked(lower); l {
+		t.Fatal("lower-case key must be unaffected — keys are opaque, not case-folded")
+	}
+}
+
 // errStore is a LoginAttemptStore whose every method fails, used to prove the
 // service surfaces persistence errors rather than swallowing them.
 type errStore struct{ err error }
