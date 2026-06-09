@@ -35,7 +35,7 @@ func openTestDB(t *testing.T) *sql.DB {
 	if _, err := db.Exec(string(schema)); err != nil {
 		t.Fatalf("apply schema: %v", err)
 	}
-	for _, tbl := range []string{"authgo_sessions", "authgo_magic_links", "authgo_passkeys"} {
+	for _, tbl := range []string{"authgo_sessions", "authgo_magic_links", "authgo_passkeys", "authgo_login_attempts"} {
 		if _, err := db.Exec("TRUNCATE " + tbl); err != nil {
 			t.Fatalf("truncate %s: %v", tbl, err)
 		}

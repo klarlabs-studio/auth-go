@@ -188,9 +188,62 @@ func requireOneRow(res sql.Result) error {
 	return nil
 }
 
+// LoginAttemptRepo is a Postgres domain.LoginAttemptStore. Callers SHOULD pass
+// a hashed key (e.g. hex SHA-256 of the email) so plaintext PII is never
+// persisted — this adapter stores the key verbatim.
+type LoginAttemptRepo struct{ db DB }
+
+// NewLoginAttemptRepo builds a login-attempt store over db.
+func NewLoginAttemptRepo(db DB) *LoginAttemptRepo { return &LoginAttemptRepo{db: db} }
+
+// Get loads a key's state or returns domain.ErrNotFound.
+func (r *LoginAttemptRepo) Get(key string) (domain.LoginAttemptSnapshot, error) {
+	var snap domain.LoginAttemptSnapshot
+	var until sql.NullTime
+	err := r.db.QueryRow(
+		`SELECT key, failure_count, locked_until
+		   FROM authgo_login_attempts WHERE key = $1`, key,
+	).Scan(&snap.Key, &snap.FailureCount, &until)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.LoginAttemptSnapshot{}, domain.ErrNotFound
+	}
+	if err != nil {
+		return domain.LoginAttemptSnapshot{}, err
+	}
+	if until.Valid {
+		snap.LockedUntil = until.Time
+	}
+	return snap, nil
+}
+
+// Save upserts a key's state.
+func (r *LoginAttemptRepo) Save(s domain.LoginAttemptSnapshot) error {
+	var until sql.NullTime
+	if !s.LockedUntil.IsZero() {
+		until = sql.NullTime{Time: s.LockedUntil, Valid: true}
+	}
+	_, err := r.db.Exec(
+		`INSERT INTO authgo_login_attempts (key, failure_count, locked_until, updated_at)
+		 VALUES ($1, $2, $3, now())
+		 ON CONFLICT (key) DO UPDATE SET
+		   failure_count = EXCLUDED.failure_count,
+		   locked_until  = EXCLUDED.locked_until,
+		   updated_at    = now()`,
+		s.Key, s.FailureCount, until,
+	)
+	return err
+}
+
+// Delete removes a key's state.
+func (r *LoginAttemptRepo) Delete(key string) error {
+	_, err := r.db.Exec(`DELETE FROM authgo_login_attempts WHERE key = $1`, key)
+	return err
+}
+
 // Port assertions.
 var (
 	_ domain.SessionRepository   = (*SessionRepo)(nil)
 	_ domain.MagicLinkRepository = (*MagicLinkRepo)(nil)
 	_ domain.PasskeyRepository   = (*PasskeyRepo)(nil)
+	_ domain.LoginAttemptStore   = (*LoginAttemptRepo)(nil)
 )

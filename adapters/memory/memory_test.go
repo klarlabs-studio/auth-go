@@ -98,3 +98,31 @@ func TestPasskeyRepo(t *testing.T) {
 		t.Fatal("delete failed")
 	}
 }
+
+func TestLoginAttemptRepo(t *testing.T) {
+	repo := memory.NewLoginAttemptRepo()
+	key := "k"
+
+	// Unknown key → ErrNotFound.
+	if _, err := repo.Get(key); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("unknown: want ErrNotFound, got %v", err)
+	}
+
+	until := time.Date(2026, 6, 8, 12, 15, 0, 0, time.UTC)
+	if err := repo.Save(domain.LoginAttemptSnapshot{Key: key, FailureCount: 5, LockedUntil: until}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := repo.Get(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.FailureCount != 5 || !got.LockedUntil.Equal(until) {
+		t.Fatalf("roundtrip: %+v", got)
+	}
+	if err := repo.Delete(key); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.Get(key); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("after delete: want ErrNotFound, got %v", err)
+	}
+}

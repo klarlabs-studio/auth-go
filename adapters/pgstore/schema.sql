@@ -27,3 +27,12 @@ CREATE TABLE IF NOT EXISTS authgo_passkeys (
     name        TEXT        NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS authgo_passkeys_user_idx ON authgo_passkeys (user_id);
+
+-- Brute-force lockout counters. `key` is opaque to the library; callers SHOULD
+-- store a hash of the email (hex SHA-256) so no plaintext PII is persisted.
+CREATE TABLE IF NOT EXISTS authgo_login_attempts (
+    key           TEXT        PRIMARY KEY,
+    failure_count INTEGER     NOT NULL DEFAULT 0,
+    locked_until  TIMESTAMPTZ,
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
