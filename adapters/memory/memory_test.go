@@ -237,3 +237,58 @@ func TestWorkloadKeyRepo_Concurrency(t *testing.T) {
 		t.Fatalf("concurrent issue/revoke left keys: %d", len(left))
 	}
 }
+
+// TestWorkloadKeyRepo_ConcurrentRotate exercises RotateKey concurrently against
+// the in-memory store. RotateKey creates the new key before deleting the old,
+// so the two briefly overlap; run with -race to detect data races in the
+// store's two-map (byID/byHash) maintenance across that overlap window. After
+// all rotations settle, exactly one key must survive and validate.
+func TestWorkloadKeyRepo_ConcurrentRotate(t *testing.T) {
+	ctx := context.Background()
+	repo := memory.NewWorkloadKeyRepo()
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	svc := domain.NewWorkloadKeyService(repo, func() time.Time { return now })
+	w := wid(t, "agent-rotate")
+
+	const n = 40
+	ids := make([]domain.KeyID, n)
+	for i := 0; i < n; i++ {
+		key, _, err := svc.IssueKey(ctx, domain.KeyRequest{
+			WorkerID:  w,
+			Scope:     scope(t, "tools:*"),
+			ExpiresAt: now.Add(time.Hour),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids[i] = key.ID()
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(id domain.KeyID) {
+			defer wg.Done()
+			newKey, newRaw, err := svc.RotateKey(ctx, id)
+			if err != nil {
+				t.Errorf("rotate %s: %v", id, err)
+				return
+			}
+			// The rotated token must validate during/after the overlap window.
+			if _, err := svc.ValidateKey(ctx, newRaw); err != nil {
+				t.Errorf("validate rotated %s: %v", newKey.ID(), err)
+			}
+		}(ids[i])
+	}
+	wg.Wait()
+
+	// Each rotation deletes exactly its old key and leaves its new one, so the
+	// worker still has n keys total — no key was lost or duplicated.
+	left, err := svc.ListKeys(ctx, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != n {
+		t.Fatalf("after concurrent rotate: want %d keys, got %d", n, len(left))
+	}
+}

@@ -212,6 +212,15 @@ func TestNewWorkloadToken_EntropyAndFormat(t *testing.T) {
 	if _, err := domain.WorkloadTokenFromString("not-hex-zz"); !errors.Is(err, domain.ErrInvalidKeyToken) {
 		t.Fatalf("bad hex: want ErrInvalidKeyToken, got %v", err)
 	}
+	// Happy path: a freshly generated token round-trips through FromString and
+	// is byte-for-byte preserved.
+	got, err := domain.WorkloadTokenFromString(a.String())
+	if err != nil {
+		t.Fatalf("valid 64-hex token: unexpected err %v", err)
+	}
+	if got.String() != a.String() {
+		t.Fatalf("FromString round-trip mismatch: %q vs %q", got.String(), a.String())
+	}
 }
 
 // ── APIKey aggregate / snapshot ─────────────────────────────
