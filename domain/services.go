@@ -2,7 +2,9 @@ package domain
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
+	"encoding/hex"
 	"errors"
 	"time"
 )
@@ -164,14 +166,20 @@ func NewWorkloadKeyService(store WorkloadStore, clock Clock) *WorkloadKeyService
 	return &WorkloadKeyService{store: store, now: orSystemClock(clock), newID: randomKeyID}
 }
 
-// randomKeyID returns an opaque, high-entropy key identifier. It is not a
-// credential — it is safe to log and surface for revocation/rotation.
+// keyIDBytes is the entropy of a KeyID (128-bit). A KeyID only needs to be
+// collision-resistant and unguessable enough to be safe to surface; it is not a
+// credential, so it uses its own generator distinct from the 256-bit token.
+const keyIDBytes = 16
+
+// randomKeyID returns an opaque, wk_-prefixed key identifier from 16 bytes of
+// crypto/rand, hex-encoded ("wk_" + 32 hex chars). It is not a credential — it
+// is safe to log and surface for revocation/rotation.
 func randomKeyID() (KeyID, error) {
-	tok, err := NewWorkloadToken()
-	if err != nil {
+	b := make([]byte, keyIDBytes)
+	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
-	return KeyID("wk_" + tok.String()), nil
+	return KeyID("wk_" + hex.EncodeToString(b)), nil
 }
 
 // IssueKey generates a fresh token, persists only its hash, and returns the new

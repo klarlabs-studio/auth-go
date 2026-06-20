@@ -561,8 +561,20 @@ func TestAPIKey_AccessorsAndPermissionParts(t *testing.T) {
 	if !key.CreatedAt().Equal(now) {
 		t.Fatalf("CreatedAt: %v", key.CreatedAt())
 	}
-	if key.ID().String() == "" {
-		t.Fatal("KeyID String empty")
+	// KeyID is a dedicated 16-byte (128-bit) crypto/rand hex id, wk_-prefixed:
+	// "wk_" + 32 hex chars = 35 chars. It is distinct from the 256-bit token
+	// generator.
+	id := key.ID().String()
+	if !strings.HasPrefix(id, "wk_") {
+		t.Fatalf("KeyID missing wk_ prefix: %q", id)
+	}
+	if len(id) != len("wk_")+32 {
+		t.Fatalf("KeyID length: want %d (wk_ + 32 hex), got %d (%q)", len("wk_")+32, len(id), id)
+	}
+	for _, c := range strings.TrimPrefix(id, "wk_") {
+		if !strings.ContainsRune("0123456789abcdef", c) {
+			t.Fatalf("KeyID has non-hex char %q in %q", c, id)
+		}
 	}
 
 	p := mustPerm(t, "tools:read")
