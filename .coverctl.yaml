@@ -14,6 +14,13 @@ policy:
       match:
         - ./adapters/memory/...
       min: 85
+    # SQLite adapter — embedded, so it is fully unit-tested without an external
+    # service (table-driven CRUD + workload key flows + expiry/rotation, plus
+    # I/O and decode error paths). Same bar as the other unit-tested adapters.
+    - name: sqlite
+      match:
+        - ./adapters/sqlite/...
+      min: 85
     # WebAuthn adapter — ceremonies need a real browser/authenticator; only
     # wiring + option generation is unit-testable.
     - name: webauthn

@@ -29,6 +29,8 @@ domain/              the auth bounded context — entities, value objects,
 adapters/
   memory/            in-memory ports — tests + single-node dev
   pgstore/           Postgres ports (database/sql, no driver dep) + schema.sql
+  sqlite/            SQLite ports (database/sql + modernc.org/sqlite, cgo-free)
+                     + schema.sql; embedded, self-migrating via Open
   webauthn/          PasskeyAuthenticator over go-webauthn (passkey adapter)
 
 middleware/
@@ -37,7 +39,10 @@ middleware/
 ```
 
 Value objects enforce their own invariants in constructors — no anemic models.
-A product wires the repository ports to Postgres and gets every method.
+A product wires the repository ports to its store of choice — Postgres, SQLite,
+or in-memory — and gets every method. Every port method takes a
+`context.Context` first, so storage I/O honors cancellation, deadlines, and
+trace propagation.
 
 ## Methods
 
