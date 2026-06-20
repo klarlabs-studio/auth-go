@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
 // Clock returns the current time. Injected for deterministic tests.
 type Clock func() time.Time
@@ -127,4 +130,192 @@ func (s *MagicLinkService) Consume(raw Token) (MagicLink, error) {
 	}
 	link.consumed = true
 	return link, nil
+}
+
+// KeyClaims is the validated, read-only result of authenticating a workload
+// token: the worker the key belongs to and the capabilities it grants.
+type KeyClaims struct {
+	WorkerID WorkerID
+	Scope    Scope
+}
+
+// KeyRequest is the input to WorkloadKeyService.IssueKey — the worker, the
+// granted scope, and the absolute expiry instant.
+type KeyRequest struct {
+	WorkerID  WorkerID
+	Scope     Scope
+	ExpiresAt time.Time
+}
+
+// WorkloadKeyService is a domain service issuing, validating, authorizing,
+// rotating, and revoking scoped API keys for agent workers over a
+// WorkloadStore. It owns the entropy, hashing, and expiry invariants. The raw
+// token is returned exactly once (at issue/rotate); only its hash is persisted.
+type WorkloadKeyService struct {
+	store WorkloadStore
+	now   Clock
+	newID func() (KeyID, error)
+}
+
+// NewWorkloadKeyService builds the service. A nil clock uses the wall clock.
+func NewWorkloadKeyService(store WorkloadStore, clock Clock) *WorkloadKeyService {
+	return &WorkloadKeyService{store: store, now: orSystemClock(clock), newID: randomKeyID}
+}
+
+// randomKeyID returns an opaque, high-entropy key identifier. It is not a
+// credential — it is safe to log and surface for revocation/rotation.
+func randomKeyID() (KeyID, error) {
+	tok, err := NewWorkloadToken()
+	if err != nil {
+		return "", err
+	}
+	return KeyID("wk_" + tok.String()), nil
+}
+
+// IssueKey generates a fresh token, persists only its hash, and returns the new
+// APIKey plus the RAW token — which the caller must surface to the worker
+// immediately, as it is never recoverable again.
+func (s *WorkloadKeyService) IssueKey(req KeyRequest) (APIKey, WorkloadToken, error) {
+	key, raw, err := s.issue(req)
+	if err != nil {
+		return APIKey{}, WorkloadToken{}, err
+	}
+	if err := s.store.CreateKey(key); err != nil {
+		return APIKey{}, WorkloadToken{}, err
+	}
+	return key, raw, nil
+}
+
+// issue builds (but does not persist) a fresh APIKey from a request, enforcing
+// the request invariants. Shared by IssueKey and RotateKey.
+func (s *WorkloadKeyService) issue(req KeyRequest) (APIKey, WorkloadToken, error) {
+	if req.WorkerID.IsZero() {
+		return APIKey{}, WorkloadToken{}, ErrInvalidWorkerID
+	}
+	if req.Scope.IsZero() {
+		return APIKey{}, WorkloadToken{}, ErrInvalidScope
+	}
+	now := s.now()
+	// Expiry must be strictly in the future; an at-or-before-now expiry would
+	// issue a dead-on-arrival key.
+	if !req.ExpiresAt.After(now) {
+		return APIKey{}, WorkloadToken{}, ErrInvalidExpiry
+	}
+	raw, err := NewWorkloadToken()
+	if err != nil {
+		return APIKey{}, WorkloadToken{}, err
+	}
+	id, err := s.newID()
+	if err != nil {
+		return APIKey{}, WorkloadToken{}, err
+	}
+	key := APIKey{
+		id:        id,
+		hash:      HashWorkloadToken(raw),
+		workerID:  req.WorkerID,
+		scope:     req.Scope,
+		expiresAt: req.ExpiresAt,
+		createdAt: now,
+	}
+	return key, raw, nil
+}
+
+// ValidateKey hashes an inbound token, looks the key up, and enforces expiry,
+// returning the worker + scope claims. Returns ErrKeyNotFound for an unknown
+// token and ErrKeyExpired for an expired one.
+func (s *WorkloadKeyService) ValidateKey(token WorkloadToken) (KeyClaims, error) {
+	key, err := s.store.GetKeyByHash(HashWorkloadToken(token))
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return KeyClaims{}, ErrKeyNotFound
+		}
+		return KeyClaims{}, err
+	}
+	if key.Expired(s.now()) {
+		return KeyClaims{}, ErrKeyExpired
+	}
+	return KeyClaims{WorkerID: key.workerID, Scope: key.scope}, nil
+}
+
+// Authorize validates a token and checks its scope against a concrete
+// "resource:action" permission. Returns ErrInvalidScope for a malformed
+// permission, ErrScopeDenied when the key's scope does not cover it, and the
+// validation errors (ErrKeyNotFound / ErrKeyExpired) otherwise.
+func (s *WorkloadKeyService) Authorize(token WorkloadToken, permission string) error {
+	perm, err := NewPermission(permission)
+	if err != nil {
+		return err
+	}
+	claims, err := s.ValidateKey(token)
+	if err != nil {
+		return err
+	}
+	if !claims.Scope.Allows(perm) {
+		return ErrScopeDenied
+	}
+	return nil
+}
+
+// RevokeKey deletes one key by ID. Returns ErrKeyNotFound if absent.
+func (s *WorkloadKeyService) RevokeKey(id KeyID) error {
+	if err := s.store.DeleteKey(id); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return ErrKeyNotFound
+		}
+		return err
+	}
+	return nil
+}
+
+// RevokeAllKeys deletes every key for a worker (kill-switch).
+func (s *WorkloadKeyService) RevokeAllKeys(workerID WorkerID) error {
+	keys, err := s.store.ListKeysByWorker(workerID)
+	if err != nil {
+		return err
+	}
+	for _, k := range keys {
+		if err := s.store.DeleteKey(k.id); err != nil && !errors.Is(err, ErrNotFound) {
+			return err
+		}
+	}
+	return nil
+}
+
+// ListKeys returns every key for a worker. Keys carry only their hash, never
+// the raw token, so they are safe to return for inventory/management UIs.
+func (s *WorkloadKeyService) ListKeys(workerID WorkerID) ([]APIKey, error) {
+	return s.store.ListKeysByWorker(workerID)
+}
+
+// RotateKey issues a replacement key — same worker, scope, and expiry — and
+// invalidates the old one, returning the new APIKey and its RAW token. The new
+// key is created before the old is deleted so a failure never leaves the worker
+// with no usable key; if deletion of the old key fails the rotation is rolled
+// back by deleting the freshly-created key.
+func (s *WorkloadKeyService) RotateKey(id KeyID) (APIKey, WorkloadToken, error) {
+	old, err := s.store.GetKey(id)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return APIKey{}, WorkloadToken{}, ErrKeyNotFound
+		}
+		return APIKey{}, WorkloadToken{}, err
+	}
+	newKey, raw, err := s.issue(KeyRequest{
+		WorkerID:  old.workerID,
+		Scope:     old.scope,
+		ExpiresAt: old.expiresAt,
+	})
+	if err != nil {
+		return APIKey{}, WorkloadToken{}, err
+	}
+	if err := s.store.CreateKey(newKey); err != nil {
+		return APIKey{}, WorkloadToken{}, err
+	}
+	if err := s.store.DeleteKey(old.id); err != nil {
+		// Roll back the new key so we don't leave two live keys after a failed
+		// rotation; best-effort cleanup, original error is surfaced.
+		_ = s.store.DeleteKey(newKey.id)
+		return APIKey{}, WorkloadToken{}, err
+	}
+	return newKey, raw, nil
 }
