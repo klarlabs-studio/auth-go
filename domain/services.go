@@ -344,13 +344,18 @@ func (s *WorkloadKeyService) ListKeys(ctx context.Context, workerID WorkerID) ([
 // RotateKey issues a replacement key — same worker, scope, and expiry — and
 // invalidates the old one, returning the new APIKey and its RAW token.
 //
-// This is NOT transactional across stores. It creates the new key first, then
-// deletes the old one, so the two keys briefly OVERLAP (both valid) — there is
-// never a gap with no usable key. If deleting the old key fails, the new key is
-// rolled back on a best-effort basis (its delete is attempted and its error
-// ignored) and the original delete error is surfaced. Over a non-transactional
-// store these steps are not atomic; a crash between create and delete can leave
-// both keys live until the old one expires or is revoked.
+// If the store implements AtomicRotator (the sqlite and pgstore adapters do),
+// the swap runs in a single transaction: the old key is deleted and the new key
+// inserted atomically, so there is never a window where both keys are live and
+// no crash can leave the old key dangling.
+//
+// Otherwise it falls back to a create-then-delete path: it creates the new key
+// first, then deletes the old one, so the two keys briefly OVERLAP (both valid)
+// — there is never a gap with no usable key. If deleting the old key fails, the
+// new key is rolled back on a best-effort basis and the original delete error
+// is surfaced. Over a non-transactional store these steps are not atomic; a
+// crash between create and delete can leave both keys live until the old one
+// expires or is revoked.
 func (s *WorkloadKeyService) RotateKey(ctx context.Context, id KeyID) (APIKey, WorkloadToken, error) {
 	old, err := s.store.GetKey(ctx, id)
 	if err != nil {
@@ -367,6 +372,19 @@ func (s *WorkloadKeyService) RotateKey(ctx context.Context, id KeyID) (APIKey, W
 	if err != nil {
 		return APIKey{}, WorkloadToken{}, err
 	}
+
+	// Atomic path: a single-transaction swap when the store supports it.
+	if ar, ok := s.store.(AtomicRotator); ok {
+		if err := ar.RotateAtomically(ctx, old.id, newKey); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return APIKey{}, WorkloadToken{}, ErrKeyNotFound
+			}
+			return APIKey{}, WorkloadToken{}, err
+		}
+		return newKey, raw, nil
+	}
+
+	// Non-transactional fallback: create-then-delete with overlap.
 	if err := s.store.CreateKey(ctx, newKey); err != nil {
 		return APIKey{}, WorkloadToken{}, err
 	}

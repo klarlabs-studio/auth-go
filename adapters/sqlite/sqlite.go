@@ -435,6 +435,61 @@ func (r *WorkloadKeyRepo) DeleteKey(ctx context.Context, id domain.KeyID) error 
 	return requireOneRow(res)
 }
 
+// txBeginner is the subset of *sql.DB that can start a transaction. A repo built
+// over a *sql.DB satisfies it; a repo built over a *sql.Tx (composed into a
+// caller's transaction) does not — in which case the swap below already runs
+// inside that outer transaction and is atomic without a nested one.
+type txBeginner interface {
+	BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
+}
+
+// RotateAtomically deletes oldID and inserts newKey in a single transaction,
+// implementing domain.AtomicRotator. When the repo is backed by a *sql.DB it
+// opens a transaction so the delete+insert apply atomically (no window where
+// both keys are live and no crash can leave the old key dangling). When backed
+// by a *sql.Tx already (composed into a caller's transaction) it runs the two
+// statements directly — they are already atomic within that outer transaction.
+func (r *WorkloadKeyRepo) RotateAtomically(ctx context.Context, oldID domain.KeyID, newKey domain.APIKey) error {
+	beginner, ok := r.db.(txBeginner)
+	if !ok {
+		// Already inside a caller-owned *sql.Tx: the two statements below are
+		// atomic within it, so run them directly.
+		return rotateSwap(ctx, r.db, oldID, newKey)
+	}
+	tx, err := beginner.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if err := rotateSwap(ctx, tx, oldID, newKey); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+// rotateSwap performs the delete-old + insert-new pair over the given executor
+// (a *sql.DB, *sql.Tx, or this package's DB). The delete must affect exactly one
+// row (ErrNotFound otherwise); a duplicate insert maps to ErrConflict.
+func rotateSwap(ctx context.Context, db DB, oldID domain.KeyID, newKey domain.APIKey) error {
+	res, err := db.ExecContext(ctx, `DELETE FROM authgo_workload_keys WHERE id = ?`, oldID.String())
+	if err != nil {
+		return err
+	}
+	if err := requireOneRow(res); err != nil {
+		return err
+	}
+	snap := newKey.Snapshot()
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO authgo_workload_keys (id, hash, worker_id, scope, expires_at, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		snap.ID, snap.Hash, snap.WorkerID, encodeScope(snap.Scope), encodeTime(snap.ExpiresAt), encodeTime(snap.CreatedAt),
+	)
+	if isUniqueViolation(err) {
+		return domain.ErrConflict
+	}
+	return err
+}
+
 // requireOneRow maps a zero-row write to domain.ErrNotFound.
 func requireOneRow(res sql.Result) error {
 	n, err := res.RowsAffected()
@@ -510,4 +565,5 @@ var (
 	_ domain.PasskeyRepository   = (*PasskeyRepo)(nil)
 	_ domain.LoginAttemptStore   = (*LoginAttemptRepo)(nil)
 	_ domain.WorkloadStore       = (*WorkloadKeyRepo)(nil)
+	_ domain.AtomicRotator       = (*WorkloadKeyRepo)(nil)
 )

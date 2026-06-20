@@ -333,3 +333,62 @@ func TestWorkloadKeyRepo_Integration(t *testing.T) {
 		t.Fatalf("delete unknown: want ErrNotFound, got %v", err)
 	}
 }
+
+// TestWorkloadKeyRepo_RotateAtomically_Integration proves the single-transaction
+// swap over real Postgres: a successful rotate leaves exactly one key, an
+// unknown old ID yields ErrNotFound and changes nothing, and a hash collision
+// yields ErrConflict and rolls the swap back so the old key survives.
+func TestWorkloadKeyRepo_RotateAtomically_Integration(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	repo := pgstore.NewWorkloadKeyRepo(db)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	svc := domain.NewWorkloadKeyService(repo, func() time.Time { return now })
+	w, _ := domain.NewWorkerID("agent-rot")
+	sc, _ := domain.NewScope("tools:read")
+
+	old, _, err := svc.IssueKey(ctx, domain.KeyRequest{WorkerID: w, Scope: sc, ExpiresAt: now.Add(time.Hour)})
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+
+	newSnap := domain.APIKeySnapshot{
+		ID: "wk_new", Hash: "newhash", WorkerID: "agent-rot",
+		Scope: []string{"tools:read"}, ExpiresAt: now.Add(time.Hour), CreatedAt: now,
+	}
+	// Unknown old → ErrNotFound, nothing changes.
+	if err := repo.RotateAtomically(ctx, domain.KeyID("wk_absent"), domain.APIKeyFromSnapshot(newSnap)); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("rotate unknown: want ErrNotFound, got %v", err)
+	}
+	if _, err := repo.GetKey(ctx, old.ID()); err != nil {
+		t.Fatalf("old key lost after failed rotate: %v", err)
+	}
+
+	// Successful atomic swap.
+	if err := repo.RotateAtomically(ctx, old.ID(), domain.APIKeyFromSnapshot(newSnap)); err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	if _, err := repo.GetKey(ctx, old.ID()); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("old key survived atomic rotate: %v", err)
+	}
+	list, _ := repo.ListKeysByWorker(ctx, w)
+	if len(list) != 1 {
+		t.Fatalf("atomic rotate left %d keys, want 1", len(list))
+	}
+
+	// Hash collision rolls back: the second key survives.
+	second, _, err := svc.IssueKey(ctx, domain.KeyRequest{WorkerID: w, Scope: sc, ExpiresAt: now.Add(time.Hour)})
+	if err != nil {
+		t.Fatalf("issue second: %v", err)
+	}
+	collide := domain.APIKeySnapshot{
+		ID: "wk_collide", Hash: "newhash", WorkerID: "agent-rot",
+		Scope: []string{"tools:read"}, ExpiresAt: now.Add(time.Hour), CreatedAt: now,
+	}
+	if err := repo.RotateAtomically(ctx, second.ID(), domain.APIKeyFromSnapshot(collide)); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("rotate collision: want ErrConflict, got %v", err)
+	}
+	if _, err := repo.GetKey(ctx, second.ID()); err != nil {
+		t.Fatalf("second key lost after rolled-back rotate: %v", err)
+	}
+}
