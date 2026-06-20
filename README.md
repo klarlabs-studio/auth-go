@@ -54,16 +54,21 @@ A product wires the repository ports to Postgres and gets every method.
 ## Example
 
 ```go
-repo := pgstore.NewSessionRepo(db) // or memory.NewSessionRepo()
+// Every store does I/O, so each service call takes a context.Context first — it
+// carries cancellation, deadlines, and trace propagation through to the adapter
+// (Postgres, SQLite, or in-memory). Pass the per-request ctx in real code.
+ctx := context.Background()
+
+repo := pgstore.NewSessionRepo(db) // or memory.NewSessionRepo() / sqlite.NewSessionRepo(db)
 sm := domain.NewSessionService(repo, 24*time.Hour, nil)
 
 uid, _ := domain.NewUserID(userID)
 tid, _ := domain.NewTenantID(tenantID)
-s, _ := sm.Issue(uid, tid)          // set s.Token().String() as an HttpOnly cookie
+s, _ := sm.Issue(ctx, uid, tid)     // set s.Token().String() as an HttpOnly cookie
 
 tok, _ := domain.TokenFromString(cookie)
-sess, err := sm.Validate(tok)       // each request
-sm.RevokeAll(uid)                   // logout everywhere
+sess, err := sm.Validate(ctx, tok)  // each request
+sm.RevokeAll(ctx, uid)              // logout everywhere
 
 h, _ := domain.HashPassword(pw, domain.DefaultArgon2idParams())
 err = h.Verify(pw)
@@ -74,13 +79,10 @@ uri := cfg.ProvisioningURI(secret, email)   // → QR code
 err = cfg.Validate(secret, userCode, time.Now())
 
 ml := domain.NewMagicLinkService(pgstore.NewMagicLinkRepo(db), 15*time.Minute, nil)
-raw, _ := ml.Issue(emailVO, tid)    // email raw.String(); never stored
-link, err := ml.Consume(raw)        // single-use
+raw, _ := ml.Issue(ctx, emailVO, tid)  // email raw.String(); never stored
+link, err := ml.Consume(ctx, raw)      // single-use
 
 // Workload keys: scoped, time-boxed API keys for agent workers.
-// The store does I/O, so every call takes a context.Context first — it carries
-// cancellation, deadlines, and trace propagation through to Postgres.
-ctx := context.Background()          // per-request ctx in real code
 wk := domain.NewWorkloadKeyService(pgstore.NewWorkloadKeyRepo(db), nil)
 worker, _ := domain.NewWorkerID("agent-7")
 scope, _ := domain.NewScope("tools:*", "memory:read")

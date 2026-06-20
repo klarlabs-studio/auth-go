@@ -24,15 +24,15 @@ type DB interface {
 }
 
 // SessionRepo is a Postgres domain.SessionRepository.
-type SessionRepo struct{ db DB }
+type SessionRepo struct{ db ctxDB }
 
 // NewSessionRepo builds a session repository over db.
-func NewSessionRepo(db DB) *SessionRepo { return &SessionRepo{db: db} }
+func NewSessionRepo(db ctxDB) *SessionRepo { return &SessionRepo{db: db} }
 
 // Save upserts a session.
-func (r *SessionRepo) Save(s domain.Session) error {
+func (r *SessionRepo) Save(ctx context.Context, s domain.Session) error {
 	snap := s.Snapshot()
-	_, err := r.db.Exec(
+	_, err := r.db.ExecContext(ctx,
 		`INSERT INTO authgo_sessions (token, user_id, tenant_id, created_at, expires_at)
 		 VALUES ($1, $2, $3, $4, $5)
 		 ON CONFLICT (token) DO UPDATE SET
@@ -44,9 +44,9 @@ func (r *SessionRepo) Save(s domain.Session) error {
 }
 
 // FindByToken loads a session or returns domain.ErrNotFound.
-func (r *SessionRepo) FindByToken(token domain.Token) (domain.Session, error) {
+func (r *SessionRepo) FindByToken(ctx context.Context, token domain.Token) (domain.Session, error) {
 	var snap domain.SessionSnapshot
-	err := r.db.QueryRow(
+	err := r.db.QueryRowContext(ctx,
 		`SELECT token, user_id, tenant_id, created_at, expires_at
 		 FROM authgo_sessions WHERE token = $1`, token.String(),
 	).Scan(&snap.Token, &snap.UserID, &snap.TenantID, &snap.CreatedAt, &snap.ExpiresAt)
@@ -60,27 +60,27 @@ func (r *SessionRepo) FindByToken(token domain.Token) (domain.Session, error) {
 }
 
 // Delete removes one session.
-func (r *SessionRepo) Delete(token domain.Token) error {
-	_, err := r.db.Exec(`DELETE FROM authgo_sessions WHERE token = $1`, token.String())
+func (r *SessionRepo) Delete(ctx context.Context, token domain.Token) error {
+	_, err := r.db.ExecContext(ctx, `DELETE FROM authgo_sessions WHERE token = $1`, token.String())
 	return err
 }
 
 // DeleteByUser removes every session for a user.
-func (r *SessionRepo) DeleteByUser(userID domain.UserID) error {
-	_, err := r.db.Exec(`DELETE FROM authgo_sessions WHERE user_id = $1`, userID.String())
+func (r *SessionRepo) DeleteByUser(ctx context.Context, userID domain.UserID) error {
+	_, err := r.db.ExecContext(ctx, `DELETE FROM authgo_sessions WHERE user_id = $1`, userID.String())
 	return err
 }
 
 // MagicLinkRepo is a Postgres domain.MagicLinkRepository.
-type MagicLinkRepo struct{ db DB }
+type MagicLinkRepo struct{ db ctxDB }
 
 // NewMagicLinkRepo builds a magic-link repository over db.
-func NewMagicLinkRepo(db DB) *MagicLinkRepo { return &MagicLinkRepo{db: db} }
+func NewMagicLinkRepo(db ctxDB) *MagicLinkRepo { return &MagicLinkRepo{db: db} }
 
 // Save inserts a magic link.
-func (r *MagicLinkRepo) Save(m domain.MagicLink) error {
+func (r *MagicLinkRepo) Save(ctx context.Context, m domain.MagicLink) error {
 	snap := m.Snapshot()
-	_, err := r.db.Exec(
+	_, err := r.db.ExecContext(ctx,
 		`INSERT INTO authgo_magic_links (hash, email, tenant_id, expires_at, consumed)
 		 VALUES ($1, $2, $3, $4, $5)`,
 		snap.Hash, snap.Email, snap.TenantID, snap.ExpiresAt, snap.Consumed,
@@ -89,9 +89,9 @@ func (r *MagicLinkRepo) Save(m domain.MagicLink) error {
 }
 
 // FindByHash loads a link or returns domain.ErrNotFound.
-func (r *MagicLinkRepo) FindByHash(hash string) (domain.MagicLink, error) {
+func (r *MagicLinkRepo) FindByHash(ctx context.Context, hash string) (domain.MagicLink, error) {
 	var snap domain.MagicLinkSnapshot
-	err := r.db.QueryRow(
+	err := r.db.QueryRowContext(ctx,
 		`SELECT hash, email, tenant_id, expires_at, consumed
 		 FROM authgo_magic_links WHERE hash = $1`, hash,
 	).Scan(&snap.Hash, &snap.Email, &snap.TenantID, &snap.ExpiresAt, &snap.Consumed)
@@ -105,8 +105,8 @@ func (r *MagicLinkRepo) FindByHash(hash string) (domain.MagicLink, error) {
 }
 
 // MarkConsumed flags a link as used.
-func (r *MagicLinkRepo) MarkConsumed(hash string) error {
-	res, err := r.db.Exec(`UPDATE authgo_magic_links SET consumed = TRUE WHERE hash = $1`, hash)
+func (r *MagicLinkRepo) MarkConsumed(ctx context.Context, hash string) error {
+	res, err := r.db.ExecContext(ctx, `UPDATE authgo_magic_links SET consumed = TRUE WHERE hash = $1`, hash)
 	if err != nil {
 		return err
 	}
@@ -114,14 +114,14 @@ func (r *MagicLinkRepo) MarkConsumed(hash string) error {
 }
 
 // PasskeyRepo is a Postgres domain.PasskeyRepository.
-type PasskeyRepo struct{ db DB }
+type PasskeyRepo struct{ db ctxDB }
 
 // NewPasskeyRepo builds a passkey repository over db.
-func NewPasskeyRepo(db DB) *PasskeyRepo { return &PasskeyRepo{db: db} }
+func NewPasskeyRepo(db ctxDB) *PasskeyRepo { return &PasskeyRepo{db: db} }
 
 // Add inserts a credential.
-func (r *PasskeyRepo) Add(c domain.PasskeyCredential) error {
-	_, err := r.db.Exec(
+func (r *PasskeyRepo) Add(ctx context.Context, c domain.PasskeyCredential) error {
+	_, err := r.db.ExecContext(ctx,
 		`INSERT INTO authgo_passkeys (id, user_id, public_key, sign_count, name)
 		 VALUES ($1, $2, $3, $4, $5)`,
 		c.ID, c.UserID.String(), c.PublicKey, int64(c.SignCount), c.Name,
@@ -130,8 +130,8 @@ func (r *PasskeyRepo) Add(c domain.PasskeyCredential) error {
 }
 
 // ListByUser returns a user's credentials.
-func (r *PasskeyRepo) ListByUser(userID domain.UserID) ([]domain.PasskeyCredential, error) {
-	rows, err := r.db.Query(
+func (r *PasskeyRepo) ListByUser(ctx context.Context, userID domain.UserID) ([]domain.PasskeyCredential, error) {
+	rows, err := r.db.QueryContext(ctx,
 		`SELECT id, user_id, public_key, sign_count, name
 		 FROM authgo_passkeys WHERE user_id = $1`, userID.String(),
 	)
@@ -162,8 +162,8 @@ func (r *PasskeyRepo) ListByUser(userID domain.UserID) ([]domain.PasskeyCredenti
 }
 
 // UpdateSignCount advances a credential's sign count.
-func (r *PasskeyRepo) UpdateSignCount(id []byte, count uint32) error {
-	res, err := r.db.Exec(
+func (r *PasskeyRepo) UpdateSignCount(ctx context.Context, id []byte, count uint32) error {
+	res, err := r.db.ExecContext(ctx,
 		`UPDATE authgo_passkeys SET sign_count = $1 WHERE id = $2`, int64(count), id,
 	)
 	if err != nil {
@@ -173,8 +173,8 @@ func (r *PasskeyRepo) UpdateSignCount(id []byte, count uint32) error {
 }
 
 // Delete removes a credential.
-func (r *PasskeyRepo) Delete(id []byte) error {
-	_, err := r.db.Exec(`DELETE FROM authgo_passkeys WHERE id = $1`, id)
+func (r *PasskeyRepo) Delete(ctx context.Context, id []byte) error {
+	_, err := r.db.ExecContext(ctx, `DELETE FROM authgo_passkeys WHERE id = $1`, id)
 	return err
 }
 
@@ -193,16 +193,16 @@ func requireOneRow(res sql.Result) error {
 // LoginAttemptRepo is a Postgres domain.LoginAttemptStore. Callers SHOULD pass
 // a hashed key (e.g. hex SHA-256 of the email) so plaintext PII is never
 // persisted — this adapter stores the key verbatim.
-type LoginAttemptRepo struct{ db DB }
+type LoginAttemptRepo struct{ db ctxDB }
 
 // NewLoginAttemptRepo builds a login-attempt store over db.
-func NewLoginAttemptRepo(db DB) *LoginAttemptRepo { return &LoginAttemptRepo{db: db} }
+func NewLoginAttemptRepo(db ctxDB) *LoginAttemptRepo { return &LoginAttemptRepo{db: db} }
 
 // Get loads a key's state or returns domain.ErrNotFound.
-func (r *LoginAttemptRepo) Get(key string) (domain.LoginAttemptSnapshot, error) {
+func (r *LoginAttemptRepo) Get(ctx context.Context, key string) (domain.LoginAttemptSnapshot, error) {
 	var snap domain.LoginAttemptSnapshot
 	var until sql.NullTime
-	err := r.db.QueryRow(
+	err := r.db.QueryRowContext(ctx,
 		`SELECT key, failure_count, locked_until
 		   FROM authgo_login_attempts WHERE key = $1`, key,
 	).Scan(&snap.Key, &snap.FailureCount, &until)
@@ -219,12 +219,12 @@ func (r *LoginAttemptRepo) Get(key string) (domain.LoginAttemptSnapshot, error) 
 }
 
 // Save upserts a key's state.
-func (r *LoginAttemptRepo) Save(s domain.LoginAttemptSnapshot) error {
+func (r *LoginAttemptRepo) Save(ctx context.Context, s domain.LoginAttemptSnapshot) error {
 	var until sql.NullTime
 	if !s.LockedUntil.IsZero() {
 		until = sql.NullTime{Time: s.LockedUntil, Valid: true}
 	}
-	_, err := r.db.Exec(
+	_, err := r.db.ExecContext(ctx,
 		`INSERT INTO authgo_login_attempts (key, failure_count, locked_until, updated_at)
 		 VALUES ($1, $2, $3, now())
 		 ON CONFLICT (key) DO UPDATE SET
@@ -237,8 +237,8 @@ func (r *LoginAttemptRepo) Save(s domain.LoginAttemptSnapshot) error {
 }
 
 // Delete removes a key's state.
-func (r *LoginAttemptRepo) Delete(key string) error {
-	_, err := r.db.Exec(`DELETE FROM authgo_login_attempts WHERE key = $1`, key)
+func (r *LoginAttemptRepo) Delete(ctx context.Context, key string) error {
+	_, err := r.db.ExecContext(ctx, `DELETE FROM authgo_login_attempts WHERE key = $1`, key)
 	return err
 }
 

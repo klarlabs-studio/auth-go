@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"time"
@@ -61,14 +62,15 @@ type LoginAttemptSnapshot struct {
 // LoginAttemptStore is the persistence port for brute-force counters. Keys are
 // caller-chosen, opaque, and SHOULD be a hash of the email at the adapter
 // boundary so no plaintext PII is persisted (see pgstore). Implementations
-// must be safe for concurrent use.
+// must be safe for concurrent use. Every method takes a context.Context first
+// so storage I/O honors cancellation, deadlines, and trace propagation.
 type LoginAttemptStore interface {
 	// Get returns the snapshot for a key or ErrNotFound.
-	Get(key string) (LoginAttemptSnapshot, error)
+	Get(ctx context.Context, key string) (LoginAttemptSnapshot, error)
 	// Save upserts the snapshot.
-	Save(s LoginAttemptSnapshot) error
+	Save(ctx context.Context, s LoginAttemptSnapshot) error
 	// Delete removes a key's state (used on successful auth).
-	Delete(key string) error
+	Delete(ctx context.Context, key string) error
 }
 
 // LockoutService is a domain service enforcing a LockoutPolicy over a
@@ -91,12 +93,12 @@ func NewLockoutService(store LoginAttemptStore, policy LockoutPolicy, clock Cloc
 
 // IsLocked reports whether the key is currently within an active lockout
 // window. Expired locks read as unlocked.
-func (s *LockoutService) IsLocked(key string) (bool, error) {
+func (s *LockoutService) IsLocked(ctx context.Context, key string) (bool, error) {
 	key, err := normalizeLockoutKey(key)
 	if err != nil {
 		return false, err
 	}
-	snap, err := s.store.Get(key)
+	snap, err := s.store.Get(ctx, key)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return false, nil
@@ -111,8 +113,8 @@ func (s *LockoutService) IsLocked(key string) (bool, error) {
 
 // Guard returns ErrAccountLocked if the key is currently locked, else nil.
 // Call it before verifying credentials.
-func (s *LockoutService) Guard(key string) error {
-	locked, err := s.IsLocked(key)
+func (s *LockoutService) Guard(ctx context.Context, key string) error {
+	locked, err := s.IsLocked(ctx, key)
 	if err != nil {
 		return err
 	}
@@ -139,12 +141,12 @@ func (s *LockoutService) Guard(key string) error {
 // counts under high-concurrency attack should serialize per key (e.g. a
 // SELECT … FOR UPDATE adapter). This is an accepted v0.3.0 trade-off of the
 // dumb-store port.
-func (s *LockoutService) RecordFailure(key string) (locked bool, err error) {
+func (s *LockoutService) RecordFailure(ctx context.Context, key string) (locked bool, err error) {
 	key, err = normalizeLockoutKey(key)
 	if err != nil {
 		return false, err
 	}
-	snap, err := s.store.Get(key)
+	snap, err := s.store.Get(ctx, key)
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return false, err
 	}
@@ -169,19 +171,19 @@ func (s *LockoutService) RecordFailure(key string) (locked bool, err error) {
 	if justLocked {
 		snap.LockedUntil = until
 	}
-	if err := s.store.Save(snap); err != nil {
+	if err := s.store.Save(ctx, snap); err != nil {
 		return false, err
 	}
 	return justLocked, nil
 }
 
 // Clear removes a key's brute-force state. Call on successful authentication.
-func (s *LockoutService) Clear(key string) error {
+func (s *LockoutService) Clear(ctx context.Context, key string) error {
 	key, err := normalizeLockoutKey(key)
 	if err != nil {
 		return err
 	}
-	return s.store.Delete(key)
+	return s.store.Delete(ctx, key)
 }
 
 // normalizeLockoutKey validates the key without mutating it. The key is

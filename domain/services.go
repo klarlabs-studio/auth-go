@@ -36,7 +36,7 @@ func NewSessionService(repo SessionRepository, ttl time.Duration, clock Clock) *
 }
 
 // Issue creates and persists a fresh session for a user/tenant.
-func (s *SessionService) Issue(userID UserID, tenantID TenantID) (Session, error) {
+func (s *SessionService) Issue(ctx context.Context, userID UserID, tenantID TenantID) (Session, error) {
 	if userID.IsZero() {
 		return Session{}, ErrInvalidUserID
 	}
@@ -55,7 +55,7 @@ func (s *SessionService) Issue(userID UserID, tenantID TenantID) (Session, error
 		createdAt: t,
 		expiresAt: t.Add(s.ttl),
 	}
-	if err := s.repo.Save(sess); err != nil {
+	if err := s.repo.Save(ctx, sess); err != nil {
 		return Session{}, err
 	}
 	return sess, nil
@@ -63,23 +63,27 @@ func (s *SessionService) Issue(userID UserID, tenantID TenantID) (Session, error
 
 // Validate returns the session for a token, deleting and rejecting it if
 // expired. Returns ErrNotFound / ErrExpired otherwise.
-func (s *SessionService) Validate(token Token) (Session, error) {
-	sess, err := s.repo.FindByToken(token)
+func (s *SessionService) Validate(ctx context.Context, token Token) (Session, error) {
+	sess, err := s.repo.FindByToken(ctx, token)
 	if err != nil {
 		return Session{}, err
 	}
 	if sess.Expired(s.now()) {
-		_ = s.repo.Delete(token)
+		_ = s.repo.Delete(ctx, token)
 		return Session{}, ErrExpired
 	}
 	return sess, nil
 }
 
 // Revoke deletes one session (logout).
-func (s *SessionService) Revoke(token Token) error { return s.repo.Delete(token) }
+func (s *SessionService) Revoke(ctx context.Context, token Token) error {
+	return s.repo.Delete(ctx, token)
+}
 
 // RevokeAll deletes every session for a user (logout-everywhere).
-func (s *SessionService) RevokeAll(userID UserID) error { return s.repo.DeleteByUser(userID) }
+func (s *SessionService) RevokeAll(ctx context.Context, userID UserID) error {
+	return s.repo.DeleteByUser(ctx, userID)
+}
 
 // MagicLinkService is a domain service issuing and consuming magic links.
 type MagicLinkService struct {
@@ -95,7 +99,7 @@ func NewMagicLinkService(repo MagicLinkRepository, ttl time.Duration, clock Cloc
 
 // Issue creates a link and returns the RAW token to embed in the emailed URL.
 // The raw token is never persisted — only its hash.
-func (s *MagicLinkService) Issue(email Email, tenantID TenantID) (Token, error) {
+func (s *MagicLinkService) Issue(ctx context.Context, email Email, tenantID TenantID) (Token, error) {
 	if tenantID.IsZero() {
 		return Token{}, ErrInvalidTenantID
 	}
@@ -110,7 +114,7 @@ func (s *MagicLinkService) Issue(email Email, tenantID TenantID) (Token, error) 
 		tenantID:  tenantID,
 		expiresAt: t.Add(s.ttl),
 	}
-	if err := s.repo.Save(link); err != nil {
+	if err := s.repo.Save(ctx, link); err != nil {
 		return Token{}, err
 	}
 	return raw, nil
@@ -118,8 +122,8 @@ func (s *MagicLinkService) Issue(email Email, tenantID TenantID) (Token, error) 
 
 // Consume validates a raw token and, on success, marks it consumed and returns
 // the link. Returns ErrNotFound / ErrExpired / ErrConsumed otherwise.
-func (s *MagicLinkService) Consume(raw Token) (MagicLink, error) {
-	link, err := s.repo.FindByHash(HashToken(raw))
+func (s *MagicLinkService) Consume(ctx context.Context, raw Token) (MagicLink, error) {
+	link, err := s.repo.FindByHash(ctx, HashToken(raw))
 	if err != nil {
 		return MagicLink{}, err
 	}
@@ -129,7 +133,7 @@ func (s *MagicLinkService) Consume(raw Token) (MagicLink, error) {
 	if link.Expired(s.now()) {
 		return MagicLink{}, ErrExpired
 	}
-	if err := s.repo.MarkConsumed(link.hash); err != nil {
+	if err := s.repo.MarkConsumed(ctx, link.hash); err != nil {
 		return MagicLink{}, err
 	}
 	link.consumed = true

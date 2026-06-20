@@ -1,5 +1,7 @@
 package domain
 
+import "context"
+
 // PasskeyCredential is an entity: a stored WebAuthn credential bound to a user.
 // Identity is its credential ID.
 type PasskeyCredential struct {
@@ -17,20 +19,25 @@ func (c PasskeyCredential) WithSignCount(n uint32) PasskeyCredential {
 	return c
 }
 
-// PasskeyRepository is the persistence port for passkey credentials.
+// PasskeyRepository is the persistence port for passkey credentials. Every
+// method takes a context.Context first so storage I/O honors cancellation,
+// deadlines, and trace propagation.
 type PasskeyRepository interface {
-	Add(c PasskeyCredential) error
-	ListByUser(userID UserID) ([]PasskeyCredential, error)
-	UpdateSignCount(id []byte, count uint32) error
-	Delete(id []byte) error
+	Add(ctx context.Context, c PasskeyCredential) error
+	ListByUser(ctx context.Context, userID UserID) ([]PasskeyCredential, error)
+	UpdateSignCount(ctx context.Context, id []byte, count uint32) error
+	Delete(ctx context.Context, id []byte) error
 }
 
 // PasskeyAuthenticator is the port for the WebAuthn ceremony engine,
 // implemented by adapters/webauthn. Opaque byte blobs are the JSON
-// challenge/response payloads exchanged with navigator.credentials.
+// challenge/response payloads exchanged with navigator.credentials. Each
+// ceremony method takes a context.Context first because it loads/advances the
+// user's credentials through a PasskeyRepository, so the storage I/O honors
+// cancellation, deadlines, and trace propagation.
 type PasskeyAuthenticator interface {
-	BeginRegistration(userID UserID, displayName string) (options []byte, state []byte, err error)
-	FinishRegistration(state []byte, response []byte) (PasskeyCredential, error)
-	BeginLogin(userID UserID) (options []byte, state []byte, err error)
-	FinishLogin(state []byte, response []byte) (credentialID []byte, err error)
+	BeginRegistration(ctx context.Context, userID UserID, displayName string) (options []byte, state []byte, err error)
+	FinishRegistration(ctx context.Context, state []byte, response []byte) (PasskeyCredential, error)
+	BeginLogin(ctx context.Context, userID UserID) (options []byte, state []byte, err error)
+	FinishLogin(ctx context.Context, state []byte, response []byte) (credentialID []byte, err error)
 }

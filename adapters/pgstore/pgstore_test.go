@@ -64,16 +64,17 @@ func tid(t *testing.T, s string) domain.TenantID {
 }
 
 func TestSessionRepo_Integration(t *testing.T) {
+	ctx := context.Background()
 	db := openTestDB(t)
 	repo := pgstore.NewSessionRepo(db)
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	svc := domain.NewSessionService(repo, time.Hour, func() time.Time { return now })
 
-	s, err := svc.Issue(uid(t, "u1"), tid(t, "t1"))
+	s, err := svc.Issue(ctx, uid(t, "u1"), tid(t, "t1"))
 	if err != nil {
 		t.Fatalf("issue: %v", err)
 	}
-	got, err := svc.Validate(s.Token())
+	got, err := svc.Validate(ctx, s.Token())
 	if err != nil {
 		t.Fatalf("validate: %v", err)
 	}
@@ -82,72 +83,74 @@ func TestSessionRepo_Integration(t *testing.T) {
 	}
 
 	// upsert (Save twice) must not error
-	if err := repo.Save(s); err != nil {
+	if err := repo.Save(ctx, s); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
 
-	if err := svc.RevokeAll(uid(t, "u1")); err != nil {
+	if err := svc.RevokeAll(ctx, uid(t, "u1")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repo.FindByToken(s.Token()); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := repo.FindByToken(ctx, s.Token()); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("revoke-all: want ErrNotFound, got %v", err)
 	}
 }
 
 func TestMagicLinkRepo_Integration(t *testing.T) {
+	ctx := context.Background()
 	db := openTestDB(t)
 	repo := pgstore.NewMagicLinkRepo(db)
 	now := time.Now().UTC()
 	svc := domain.NewMagicLinkService(repo, 15*time.Minute, func() time.Time { return now })
 
 	email, _ := domain.NewEmail("felix@klarlabs.de")
-	raw, err := svc.Issue(email, tid(t, "t1"))
+	raw, err := svc.Issue(ctx, email, tid(t, "t1"))
 	if err != nil {
 		t.Fatalf("issue: %v", err)
 	}
-	link, err := svc.Consume(raw)
+	link, err := svc.Consume(ctx, raw)
 	if err != nil {
 		t.Fatalf("consume: %v", err)
 	}
 	if link.Email().String() != "felix@klarlabs.de" {
 		t.Fatalf("email mismatch: %s", link.Email())
 	}
-	if _, err := svc.Consume(raw); !errors.Is(err, domain.ErrConsumed) {
+	if _, err := svc.Consume(ctx, raw); !errors.Is(err, domain.ErrConsumed) {
 		t.Fatalf("reuse: want ErrConsumed, got %v", err)
 	}
 }
 
 func TestPasskeyRepo_Integration(t *testing.T) {
+	ctx := context.Background()
 	db := openTestDB(t)
 	repo := pgstore.NewPasskeyRepo(db)
 	u := uid(t, "u1")
 
-	if err := repo.Add(domain.PasskeyCredential{
+	if err := repo.Add(ctx, domain.PasskeyCredential{
 		ID: []byte{1, 2, 3}, UserID: u, PublicKey: []byte{9, 9}, Name: "Touch ID",
 	}); err != nil {
 		t.Fatalf("add: %v", err)
 	}
-	got, err := repo.ListByUser(u)
+	got, err := repo.ListByUser(ctx, u)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
 	if len(got) != 1 || got[0].Name != "Touch ID" {
 		t.Fatalf("list mismatch: %+v", got)
 	}
-	if err := repo.UpdateSignCount([]byte{1, 2, 3}, 7); err != nil {
+	if err := repo.UpdateSignCount(ctx, []byte{1, 2, 3}, 7); err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	again, _ := repo.ListByUser(u)
+	again, _ := repo.ListByUser(ctx, u)
 	if again[0].SignCount != 7 {
 		t.Fatalf("sign count: %d", again[0].SignCount)
 	}
-	if err := repo.UpdateSignCount([]byte{0}, 1); !errors.Is(err, domain.ErrNotFound) {
+	if err := repo.UpdateSignCount(ctx, []byte{0}, 1); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("unknown update: want ErrNotFound, got %v", err)
 	}
-	if err := repo.Delete([]byte{1, 2, 3}); err != nil {
+	if err := repo.Delete(ctx, []byte{1, 2, 3}); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	final, _ := repo.ListByUser(u)
+	final, _ := repo.ListByUser(ctx, u)
 	if len(final) != 0 {
 		t.Fatalf("delete left rows: %+v", final)
 	}

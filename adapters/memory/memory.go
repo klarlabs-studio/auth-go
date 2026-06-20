@@ -1,6 +1,12 @@
 // Package memory provides in-memory implementations of the auth domain
 // repository ports, for tests and single-node development. Production backs the
-// ports with Postgres (../pgstore) instead.
+// ports with Postgres (../pgstore) or SQLite (../sqlite) instead.
+//
+// Every method opens with a best-effort ctx.Err() entry guard: the in-memory
+// store does no blocking I/O, so there is no mid-operation cancellation point.
+// Checking ctx.Err() up front only honors an already-cancelled context for
+// parity with the repository contracts (which require ctx propagation) — it is
+// not a cancellation guarantee mid-flight.
 package memory
 
 import (
@@ -22,7 +28,10 @@ func NewSessionRepo() *SessionRepo {
 }
 
 // Save persists a session.
-func (r *SessionRepo) Save(s domain.Session) error {
+func (r *SessionRepo) Save(ctx context.Context, s domain.Session) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	snap := s.Snapshot()
@@ -31,7 +40,10 @@ func (r *SessionRepo) Save(s domain.Session) error {
 }
 
 // FindByToken returns the session for a token or domain.ErrNotFound.
-func (r *SessionRepo) FindByToken(token domain.Token) (domain.Session, error) {
+func (r *SessionRepo) FindByToken(ctx context.Context, token domain.Token) (domain.Session, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.Session{}, err
+	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	snap, ok := r.m[token.String()]
@@ -42,7 +54,10 @@ func (r *SessionRepo) FindByToken(token domain.Token) (domain.Session, error) {
 }
 
 // Delete removes one session.
-func (r *SessionRepo) Delete(token domain.Token) error {
+func (r *SessionRepo) Delete(ctx context.Context, token domain.Token) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.m, token.String())
@@ -50,7 +65,10 @@ func (r *SessionRepo) Delete(token domain.Token) error {
 }
 
 // DeleteByUser removes every session for a user.
-func (r *SessionRepo) DeleteByUser(userID domain.UserID) error {
+func (r *SessionRepo) DeleteByUser(ctx context.Context, userID domain.UserID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for tok, snap := range r.m {
@@ -73,7 +91,10 @@ func NewMagicLinkRepo() *MagicLinkRepo {
 }
 
 // Save persists a magic link.
-func (r *MagicLinkRepo) Save(m domain.MagicLink) error {
+func (r *MagicLinkRepo) Save(ctx context.Context, m domain.MagicLink) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	snap := m.Snapshot()
@@ -82,7 +103,10 @@ func (r *MagicLinkRepo) Save(m domain.MagicLink) error {
 }
 
 // FindByHash returns the link for a hash or domain.ErrNotFound.
-func (r *MagicLinkRepo) FindByHash(hash string) (domain.MagicLink, error) {
+func (r *MagicLinkRepo) FindByHash(ctx context.Context, hash string) (domain.MagicLink, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.MagicLink{}, err
+	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	snap, ok := r.m[hash]
@@ -93,7 +117,10 @@ func (r *MagicLinkRepo) FindByHash(hash string) (domain.MagicLink, error) {
 }
 
 // MarkConsumed flags a link as used.
-func (r *MagicLinkRepo) MarkConsumed(hash string) error {
+func (r *MagicLinkRepo) MarkConsumed(ctx context.Context, hash string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	snap, ok := r.m[hash]
@@ -117,7 +144,10 @@ func NewPasskeyRepo() *PasskeyRepo {
 }
 
 // Add stores a credential.
-func (r *PasskeyRepo) Add(c domain.PasskeyCredential) error {
+func (r *PasskeyRepo) Add(ctx context.Context, c domain.PasskeyCredential) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.m[string(c.ID)] = c
@@ -125,7 +155,10 @@ func (r *PasskeyRepo) Add(c domain.PasskeyCredential) error {
 }
 
 // ListByUser returns a user's credentials.
-func (r *PasskeyRepo) ListByUser(userID domain.UserID) ([]domain.PasskeyCredential, error) {
+func (r *PasskeyRepo) ListByUser(ctx context.Context, userID domain.UserID) ([]domain.PasskeyCredential, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	var out []domain.PasskeyCredential
@@ -138,7 +171,10 @@ func (r *PasskeyRepo) ListByUser(userID domain.UserID) ([]domain.PasskeyCredenti
 }
 
 // UpdateSignCount advances a credential's sign count.
-func (r *PasskeyRepo) UpdateSignCount(id []byte, count uint32) error {
+func (r *PasskeyRepo) UpdateSignCount(ctx context.Context, id []byte, count uint32) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	c, ok := r.m[string(id)]
@@ -150,7 +186,10 @@ func (r *PasskeyRepo) UpdateSignCount(id []byte, count uint32) error {
 }
 
 // Delete removes a credential.
-func (r *PasskeyRepo) Delete(id []byte) error {
+func (r *PasskeyRepo) Delete(ctx context.Context, id []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.m, string(id))
@@ -169,7 +208,10 @@ func NewLoginAttemptRepo() *LoginAttemptRepo {
 }
 
 // Get returns the snapshot for a key or domain.ErrNotFound.
-func (r *LoginAttemptRepo) Get(key string) (domain.LoginAttemptSnapshot, error) {
+func (r *LoginAttemptRepo) Get(ctx context.Context, key string) (domain.LoginAttemptSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.LoginAttemptSnapshot{}, err
+	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	snap, ok := r.m[key]
@@ -180,7 +222,10 @@ func (r *LoginAttemptRepo) Get(key string) (domain.LoginAttemptSnapshot, error) 
 }
 
 // Save upserts the snapshot.
-func (r *LoginAttemptRepo) Save(s domain.LoginAttemptSnapshot) error {
+func (r *LoginAttemptRepo) Save(ctx context.Context, s domain.LoginAttemptSnapshot) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.m[s.Key] = s
@@ -188,7 +233,10 @@ func (r *LoginAttemptRepo) Save(s domain.LoginAttemptSnapshot) error {
 }
 
 // Delete removes a key's state.
-func (r *LoginAttemptRepo) Delete(key string) error {
+func (r *LoginAttemptRepo) Delete(ctx context.Context, key string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.m, key)
@@ -212,13 +260,10 @@ func NewWorkloadKeyRepo() *WorkloadKeyRepo {
 	}
 }
 
-// CreateKey inserts a new key, rejecting a duplicate ID or hash.
+// CreateKey inserts a new key, rejecting a duplicate ID or hash. Like every
+// method here it opens with the package-wide best-effort ctx.Err() entry guard
+// (see the package doc).
 func (r *WorkloadKeyRepo) CreateKey(ctx context.Context, k domain.APIKey) error {
-	// Best-effort entry guard: the in-memory store does no blocking I/O, so
-	// there is no mid-operation cancellation point. Checking ctx.Err() up front
-	// only honors an already-cancelled context for parity with the WorkloadStore
-	// contract — it is not a cancellation guarantee mid-flight. The same applies
-	// to every ctx.Err() guard in this repo.
 	if err := ctx.Err(); err != nil {
 		return err
 	}
