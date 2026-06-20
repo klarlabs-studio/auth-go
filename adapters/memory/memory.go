@@ -194,10 +194,109 @@ func (r *LoginAttemptRepo) Delete(key string) error {
 	return nil
 }
 
+// WorkloadKeyRepo is an in-memory domain.WorkloadStore. It indexes keys by both
+// ID and token hash so the validation hot path (GetKeyByHash) is O(1) without
+// scanning. The two maps are kept consistent under a single lock.
+type WorkloadKeyRepo struct {
+	mu     sync.RWMutex
+	byID   map[string]domain.APIKeySnapshot
+	byHash map[string]string // hash -> id
+}
+
+// NewWorkloadKeyRepo returns an empty workload-key store.
+func NewWorkloadKeyRepo() *WorkloadKeyRepo {
+	return &WorkloadKeyRepo{
+		byID:   make(map[string]domain.APIKeySnapshot),
+		byHash: make(map[string]string),
+	}
+}
+
+// CreateKey inserts a new key, rejecting a duplicate ID or hash.
+func (r *WorkloadKeyRepo) CreateKey(k domain.APIKey) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	snap := k.Snapshot()
+	if _, exists := r.byID[snap.ID]; exists {
+		return domain.ErrConflict
+	}
+	if _, exists := r.byHash[snap.Hash]; exists {
+		return domain.ErrConflict
+	}
+	r.byID[snap.ID] = snap
+	r.byHash[snap.Hash] = snap.ID
+	return nil
+}
+
+// GetKeyByHash returns the key for a token hash or domain.ErrNotFound.
+func (r *WorkloadKeyRepo) GetKeyByHash(hash string) (domain.APIKey, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	id, ok := r.byHash[hash]
+	if !ok {
+		return domain.APIKey{}, domain.ErrNotFound
+	}
+	return domain.APIKeyFromSnapshot(r.byID[id]), nil
+}
+
+// GetKey returns the key for an ID or domain.ErrNotFound.
+func (r *WorkloadKeyRepo) GetKey(id domain.KeyID) (domain.APIKey, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	snap, ok := r.byID[id.String()]
+	if !ok {
+		return domain.APIKey{}, domain.ErrNotFound
+	}
+	return domain.APIKeyFromSnapshot(snap), nil
+}
+
+// ListKeysByWorker returns every key for a worker.
+func (r *WorkloadKeyRepo) ListKeysByWorker(workerID domain.WorkerID) ([]domain.APIKey, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []domain.APIKey
+	for _, snap := range r.byID {
+		if snap.WorkerID == workerID.String() {
+			out = append(out, domain.APIKeyFromSnapshot(snap))
+		}
+	}
+	return out, nil
+}
+
+// UpdateKey replaces an existing key by ID, keeping the hash index consistent.
+func (r *WorkloadKeyRepo) UpdateKey(k domain.APIKey) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	snap := k.Snapshot()
+	old, ok := r.byID[snap.ID]
+	if !ok {
+		return domain.ErrNotFound
+	}
+	if old.Hash != snap.Hash {
+		delete(r.byHash, old.Hash)
+		r.byHash[snap.Hash] = snap.ID
+	}
+	r.byID[snap.ID] = snap
+	return nil
+}
+
+// DeleteKey removes a key by ID. Deleting an absent key returns ErrNotFound.
+func (r *WorkloadKeyRepo) DeleteKey(id domain.KeyID) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	snap, ok := r.byID[id.String()]
+	if !ok {
+		return domain.ErrNotFound
+	}
+	delete(r.byID, snap.ID)
+	delete(r.byHash, snap.Hash)
+	return nil
+}
+
 // Port assertions.
 var (
 	_ domain.SessionRepository   = (*SessionRepo)(nil)
 	_ domain.MagicLinkRepository = (*MagicLinkRepo)(nil)
 	_ domain.PasskeyRepository   = (*PasskeyRepo)(nil)
 	_ domain.LoginAttemptStore   = (*LoginAttemptRepo)(nil)
+	_ domain.WorkloadStore       = (*WorkloadKeyRepo)(nil)
 )
