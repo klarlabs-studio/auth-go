@@ -113,6 +113,62 @@ func TestPasswordHash_SaltUniqueness(t *testing.T) {
 	}
 }
 
+// ── User ────────────────────────────────────────────────────
+
+func TestUser_ValidationAndAccessors(t *testing.T) {
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	id := mustUserID(t, "u1")
+	tn := mustTenantID(t, "t1")
+	em := mustEmail(t, "felix@klarlabs.de")
+
+	u, err := domain.NewUser(id, tn, em, now, now)
+	if err != nil {
+		t.Fatalf("NewUser: %v", err)
+	}
+	if u.ID() != id || u.TenantID() != tn || u.Email().String() != "felix@klarlabs.de" {
+		t.Fatalf("accessors mismatch: %+v", u)
+	}
+	if !u.CreatedAt().Equal(now) || !u.UpdatedAt().Equal(now) {
+		t.Fatalf("timestamps mismatch: %+v", u)
+	}
+	if u.IsZero() {
+		t.Fatal("constructed user reports zero")
+	}
+	if !(domain.User{}).IsZero() {
+		t.Fatal("zero user must report zero")
+	}
+
+	// Identity fields are required.
+	if _, err := domain.NewUser(domain.UserID{}, tn, em, now, now); !errors.Is(err, domain.ErrInvalidUserID) {
+		t.Fatalf("zero id: want ErrInvalidUserID, got %v", err)
+	}
+	if _, err := domain.NewUser(id, domain.TenantID{}, em, now, now); !errors.Is(err, domain.ErrInvalidTenantID) {
+		t.Fatalf("zero tenant: want ErrInvalidTenantID, got %v", err)
+	}
+	if _, err := domain.NewUser(id, tn, domain.Email{}, now, now); !errors.Is(err, domain.ErrInvalidEmail) {
+		t.Fatalf("zero email: want ErrInvalidEmail, got %v", err)
+	}
+}
+
+func TestUser_SnapshotRoundTrip(t *testing.T) {
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	u, err := domain.NewUser(mustUserID(t, "u1"), mustTenantID(t, "t1"), mustEmail(t, "a@b.com"), now, now.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap := u.Snapshot()
+	if snap.ID != "u1" || snap.TenantID != "t1" || snap.Email != "a@b.com" {
+		t.Fatalf("snapshot fields: %+v", snap)
+	}
+	got := domain.UserFromSnapshot(snap)
+	if got.ID() != u.ID() || got.TenantID() != u.TenantID() || got.Email().String() != u.Email().String() {
+		t.Fatalf("round-trip mismatch: %+v vs %+v", got, u)
+	}
+	if !got.CreatedAt().Equal(now) || !got.UpdatedAt().Equal(now.Add(time.Hour)) {
+		t.Fatalf("round-trip timestamps: %+v", got)
+	}
+}
+
 // ── TOTP ────────────────────────────────────────────────────
 
 func TestTOTP_RFC6238Vector(t *testing.T) {

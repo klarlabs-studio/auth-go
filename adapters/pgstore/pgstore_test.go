@@ -36,7 +36,7 @@ func openTestDB(t *testing.T) *sql.DB {
 	if _, err := db.Exec(string(schema)); err != nil {
 		t.Fatalf("apply schema: %v", err)
 	}
-	for _, tbl := range []string{"authgo_sessions", "authgo_magic_links", "authgo_passkeys", "authgo_login_attempts", "authgo_workload_keys"} {
+	for _, tbl := range []string{"authgo_users", "authgo_sessions", "authgo_magic_links", "authgo_passkeys", "authgo_login_attempts", "authgo_workload_keys"} {
 		if _, err := db.Exec("TRUNCATE " + tbl); err != nil {
 			t.Fatalf("truncate %s: %v", tbl, err)
 		}
@@ -61,6 +61,45 @@ func tid(t *testing.T, s string) domain.TenantID {
 		t.Fatal(err)
 	}
 	return id
+}
+
+func TestUserRepo_Integration(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	repo := pgstore.NewUserRepo(db)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	if _, err := repo.GetUser(ctx, uid(t, "user-pg")); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("missing user: want ErrNotFound, got %v", err)
+	}
+
+	email, _ := domain.NewEmail("felix@klarlabs.de")
+	u, err := domain.NewUser(uid(t, "user-pg"), tid(t, "tenant-pg"), email, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.UpsertUser(ctx, u); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	got, err := repo.GetUser(ctx, uid(t, "user-pg"))
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Email().String() != "felix@klarlabs.de" || got.TenantID().String() != "tenant-pg" {
+		t.Fatalf("roundtrip mismatch: %+v", got.Snapshot())
+	}
+
+	// Upsert updates in place.
+	later := now.Add(time.Hour)
+	other, _ := domain.NewEmail("new@klarlabs.de")
+	u2, _ := domain.NewUser(uid(t, "user-pg"), tid(t, "tenant-pg"), other, now, later)
+	if err := repo.UpsertUser(ctx, u2); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	got, _ = repo.GetUser(ctx, uid(t, "user-pg"))
+	if got.Email().String() != "new@klarlabs.de" || !got.UpdatedAt().Equal(later) {
+		t.Fatalf("upsert did not update: %+v", got.Snapshot())
+	}
 }
 
 func TestSessionRepo_Integration(t *testing.T) {

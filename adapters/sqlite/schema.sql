@@ -14,6 +14,15 @@
 --   * now()       → handled in Go (the adapter stamps updated_at), so the
 --     schema carries no function-valued default.
 
+CREATE TABLE IF NOT EXISTS authgo_users (
+    id          TEXT PRIMARY KEY,
+    tenant_id   TEXT NOT NULL,
+    email       TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS authgo_users_tenant_idx ON authgo_users (tenant_id);
+
 CREATE TABLE IF NOT EXISTS authgo_sessions (
     token       TEXT PRIMARY KEY,
     user_id     TEXT NOT NULL,

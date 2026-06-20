@@ -65,6 +65,53 @@ func scope(t *testing.T, actions ...string) domain.Scope {
 	return sc
 }
 
+func TestUserRepo(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	repo := sqlite.NewUserRepo(db)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	if _, err := repo.GetUser(ctx, uid(t, "u1")); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("missing user: want ErrNotFound, got %v", err)
+	}
+
+	u, err := domain.NewUser(uid(t, "u1"), tid(t), mustEmail(t), now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.UpsertUser(ctx, u); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	got, err := repo.GetUser(ctx, uid(t, "u1"))
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Email().String() != "a@b.co" || got.TenantID().String() != "t1" {
+		t.Fatalf("roundtrip mismatch: %+v", got.Snapshot())
+	}
+	if !got.CreatedAt().Equal(now) || !got.UpdatedAt().Equal(now) {
+		t.Fatalf("timestamps not round-tripped: %+v", got.Snapshot())
+	}
+
+	// Upsert updates in place.
+	later := now.Add(time.Hour)
+	other, err := domain.NewEmail("c@d.co")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u2, err := domain.NewUser(uid(t, "u1"), tid(t), other, now, later)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.UpsertUser(ctx, u2); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	got, _ = repo.GetUser(ctx, uid(t, "u1"))
+	if got.Email().String() != "c@d.co" || !got.UpdatedAt().Equal(later) {
+		t.Fatalf("upsert did not update: %+v", got.Snapshot())
+	}
+}
+
 func TestSessionRepo(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)

@@ -26,6 +26,42 @@ type DB interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
+// UserRepo is a Postgres domain.UserRepository.
+type UserRepo struct{ db DB }
+
+// NewUserRepo builds a user repository over db.
+func NewUserRepo(db DB) *UserRepo { return &UserRepo{db: db} }
+
+// GetUser loads a user or returns domain.ErrNotFound.
+func (r *UserRepo) GetUser(ctx context.Context, id domain.UserID) (domain.User, error) {
+	var snap domain.UserSnapshot
+	err := r.db.QueryRowContext(ctx,
+		`SELECT id, tenant_id, email, created_at, updated_at
+		 FROM authgo_users WHERE id = $1`, id.String(),
+	).Scan(&snap.ID, &snap.TenantID, &snap.Email, &snap.CreatedAt, &snap.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.User{}, domain.ErrNotFound
+	}
+	if err != nil {
+		return domain.User{}, err
+	}
+	return domain.UserFromSnapshot(snap), nil
+}
+
+// UpsertUser inserts or updates a user, keyed on its ID.
+func (r *UserRepo) UpsertUser(ctx context.Context, u domain.User) error {
+	snap := u.Snapshot()
+	_, err := r.db.ExecContext(ctx,
+		`INSERT INTO authgo_users (id, tenant_id, email, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5)
+		 ON CONFLICT (id) DO UPDATE SET
+		   tenant_id = EXCLUDED.tenant_id, email = EXCLUDED.email,
+		   created_at = EXCLUDED.created_at, updated_at = EXCLUDED.updated_at`,
+		snap.ID, snap.TenantID, snap.Email, snap.CreatedAt, snap.UpdatedAt,
+	)
+	return err
+}
+
 // SessionRepo is a Postgres domain.SessionRepository.
 type SessionRepo struct{ db DB }
 
@@ -396,6 +432,7 @@ func isUniqueViolation(err error) bool {
 
 // Port assertions.
 var (
+	_ domain.UserRepository      = (*UserRepo)(nil)
 	_ domain.SessionRepository   = (*SessionRepo)(nil)
 	_ domain.MagicLinkRepository = (*MagicLinkRepo)(nil)
 	_ domain.PasskeyRepository   = (*PasskeyRepo)(nil)

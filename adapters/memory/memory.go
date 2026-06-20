@@ -16,6 +16,43 @@ import (
 	"github.com/klarlabs-studio/auth-go/domain"
 )
 
+// UserRepo is an in-memory domain.UserRepository.
+type UserRepo struct {
+	mu sync.RWMutex
+	m  map[string]domain.UserSnapshot
+}
+
+// NewUserRepo returns an empty user repository.
+func NewUserRepo() *UserRepo {
+	return &UserRepo{m: make(map[string]domain.UserSnapshot)}
+}
+
+// GetUser returns the user for an ID or domain.ErrNotFound.
+func (r *UserRepo) GetUser(ctx context.Context, id domain.UserID) (domain.User, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.User{}, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	snap, ok := r.m[id.String()]
+	if !ok {
+		return domain.User{}, domain.ErrNotFound
+	}
+	return domain.UserFromSnapshot(snap), nil
+}
+
+// UpsertUser inserts or updates a user, keyed on its ID.
+func (r *UserRepo) UpsertUser(ctx context.Context, u domain.User) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	snap := u.Snapshot()
+	r.m[snap.ID] = snap
+	return nil
+}
+
 // SessionRepo is an in-memory domain.SessionRepository.
 type SessionRepo struct {
 	mu sync.RWMutex
@@ -343,6 +380,7 @@ func (r *WorkloadKeyRepo) DeleteKey(ctx context.Context, id domain.KeyID) error 
 
 // Port assertions.
 var (
+	_ domain.UserRepository      = (*UserRepo)(nil)
 	_ domain.SessionRepository   = (*SessionRepo)(nil)
 	_ domain.MagicLinkRepository = (*MagicLinkRepo)(nil)
 	_ domain.PasskeyRepository   = (*PasskeyRepo)(nil)

@@ -2,6 +2,15 @@
 -- Tables are tenant-aware; combine with Row-Level Security per the Klarlabs
 -- product standard (tenant_id derived server-side, never from the client).
 
+CREATE TABLE IF NOT EXISTS authgo_users (
+    id          TEXT        PRIMARY KEY,
+    tenant_id   TEXT        NOT NULL,
+    email       TEXT        NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL,
+    updated_at  TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS authgo_users_tenant_idx ON authgo_users (tenant_id);
+
 CREATE TABLE IF NOT EXISTS authgo_sessions (
     token       TEXT        PRIMARY KEY,
     user_id     TEXT        NOT NULL,

@@ -34,6 +34,14 @@ func TestErrorPaths_ClosedDB(t *testing.T) {
 	ctx := context.Background()
 	db := closedDB(t)
 
+	users := sqlite.NewUserRepo(db)
+	if _, err := users.GetUser(ctx, uid(t, "u1")); err == nil {
+		t.Fatal("User.GetUser on closed DB must error")
+	}
+	if err := users.UpsertUser(ctx, domain.User{}); err == nil {
+		t.Fatal("User.UpsertUser on closed DB must error")
+	}
+
 	session := sqlite.NewSessionRepo(db)
 	if err := session.Save(ctx, domain.Session{}); err == nil {
 		t.Fatal("Save on closed DB must error")
@@ -105,6 +113,26 @@ func TestErrorPaths_ClosedDB(t *testing.T) {
 func TestErrorPaths_CorruptTimestamps(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
+
+	// User with a corrupt created_at.
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO authgo_users (id, tenant_id, email, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?)`, "u", "t", "a@b.co", "garbage", "garbage"); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	if _, err := sqlite.NewUserRepo(db).GetUser(ctx, uid(t, "u")); err == nil {
+		t.Fatal("GetUser must reject a corrupt created_at")
+	}
+	// A second user with a valid created_at but a corrupt updated_at exercises
+	// the second decode branch.
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO authgo_users (id, tenant_id, email, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?)`, "u2", "t", "a@b.co", time.Now().UTC().Format(time.RFC3339Nano), "garbage"); err != nil {
+		t.Fatalf("seed user2: %v", err)
+	}
+	if _, err := sqlite.NewUserRepo(db).GetUser(ctx, uid(t, "u2")); err == nil {
+		t.Fatal("GetUser must reject a corrupt updated_at")
+	}
 
 	// Session with a corrupt created_at.
 	if _, err := db.ExecContext(ctx,
