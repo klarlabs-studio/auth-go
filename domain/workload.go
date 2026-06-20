@@ -132,7 +132,9 @@ func splitScopeEntry(s string) (resource, action string, err error) {
 
 // splitScopeEntryAllowWildcard parses a "resource:action" entry, permitting "*"
 // in either half. Both halves must be non-empty and there must be exactly one
-// colon. Normalizes by trimming surrounding space and lower-casing.
+// colon. Normalizes by trimming surrounding space and lower-casing, then
+// validates each segment against a strict character set (see validScopeSegment)
+// so a corrupted segment can never survive into the pgstore TEXT[] writer.
 func splitScopeEntryAllowWildcard(s string) (resource, action string, err error) {
 	s = strings.ToLower(strings.TrimSpace(s))
 	res, act, ok := strings.Cut(s, ":")
@@ -143,10 +145,35 @@ func splitScopeEntryAllowWildcard(s string) (resource, action string, err error)
 	if strings.Contains(act, ":") {
 		return "", "", ErrInvalidScope
 	}
-	if res == "" || act == "" {
+	if !validScopeSegment(res) || !validScopeSegment(act) {
 		return "", "", ErrInvalidScope
 	}
 	return res, act, nil
+}
+
+// validScopeSegment reports whether a single (already lower-cased, trimmed)
+// resource or action segment is well-formed. A segment is either the bare "*"
+// wildcard or a non-empty run of [a-z0-9._-]. Any other character — comma,
+// brace, quote, space, semicolon, an embedded "*", etc. — is rejected so a
+// malformed segment cannot silently corrupt the persisted scope (e.g. the
+// pgstore array writer splitting "a,b" into two elements).
+func validScopeSegment(seg string) bool {
+	if seg == "" {
+		return false
+	}
+	if seg == "*" {
+		return true
+	}
+	for _, c := range seg {
+		switch {
+		case c >= 'a' && c <= 'z':
+		case c >= '0' && c <= '9':
+		case c == '.' || c == '_' || c == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // WorkloadToken is the raw, high-entropy bearer credential handed to an agent

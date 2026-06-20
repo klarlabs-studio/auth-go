@@ -79,6 +79,57 @@ func TestScope_Validation(t *testing.T) {
 	}
 }
 
+func TestScope_RejectsMalformedSegments(t *testing.T) {
+	// Each entry has exactly one colon but at least one segment contains a
+	// character outside the strict set [a-z0-9._-] (or a non-bare wildcard).
+	// These must be rejected so the pgstore TEXT[] writer can never silently
+	// split a corrupted segment (e.g. "a,b:c") into two array elements.
+	bad := []string{
+		"a,b:c", // comma in resource segment — the silent-corruption case
+		"a{:b",  // brace
+		`a":b`,  // double quote
+		"a :b",  // embedded space (not surrounding space that gets trimmed)
+		"a:b,c", // comma in action segment
+		"a;b:c", // semicolon
+		"a:b c", // space in action
+		"a*:b",  // wildcard mixed with other chars (not a bare "*")
+		"a:b*",  // partial wildcard in action
+	}
+	for _, s := range bad {
+		t.Run("reject_"+s, func(t *testing.T) {
+			if _, err := domain.NewScope(s); !errors.Is(err, domain.ErrInvalidScope) {
+				t.Fatalf("NewScope(%q): want ErrInvalidScope, got %v", s, err)
+			}
+		})
+	}
+
+	// "A:b" must still SUCCEED: validation runs AFTER normalization, so the
+	// uppercase letter is lower-cased to "a:b" (a valid segment) before the
+	// strict charset check. This preserves the existing normalization contract
+	// (see TestScope_NormalizesAndDeduplicates) — uppercase is normalized away,
+	// not hard-rejected.
+	if _, err := domain.NewScope("A:b"); err != nil {
+		t.Fatalf("NewScope(%q): want success after lower-casing, got %v", "A:b", err)
+	}
+
+	// Valid segments (incl. allowed punctuation and bare wildcards) still pass.
+	good := []string{
+		"tools:read",
+		"my-tool.v2:write_all",
+		"a_b-c.d:read",
+		"tools:*",
+		"*:read",
+		"*:*",
+	}
+	for _, s := range good {
+		t.Run("accept_"+s, func(t *testing.T) {
+			if _, err := domain.NewScope(s); err != nil {
+				t.Fatalf("NewScope(%q): want success, got %v", s, err)
+			}
+		})
+	}
+}
+
 func TestScope_NormalizesAndDeduplicates(t *testing.T) {
 	sc := mustScope(t, " tools:read ", "tools:read", "Memory:Write")
 	got := sc.Actions()
