@@ -15,19 +15,22 @@ import (
 	"github.com/klarlabs-studio/auth-go/domain"
 )
 
-// DB is the subset of *sql.DB the adapters need; satisfied by *sql.DB and
-// *sql.Tx, so repositories compose into a product's transactions.
+// DB is the context-aware subset of *sql.DB the adapters need; satisfied by
+// *sql.DB and *sql.Tx, so repositories compose into a product's transactions.
+// Every method carries the *Context query verbs, so all storage I/O propagates
+// cancellation, deadlines, and trace context through ctx — the single contract
+// for every repo in this package.
 type DB interface {
-	Exec(query string, args ...any) (sql.Result, error)
-	QueryRow(query string, args ...any) *sql.Row
-	Query(query string, args ...any) (*sql.Rows, error)
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
 // SessionRepo is a Postgres domain.SessionRepository.
-type SessionRepo struct{ db ctxDB }
+type SessionRepo struct{ db DB }
 
 // NewSessionRepo builds a session repository over db.
-func NewSessionRepo(db ctxDB) *SessionRepo { return &SessionRepo{db: db} }
+func NewSessionRepo(db DB) *SessionRepo { return &SessionRepo{db: db} }
 
 // Save upserts a session.
 func (r *SessionRepo) Save(ctx context.Context, s domain.Session) error {
@@ -72,10 +75,10 @@ func (r *SessionRepo) DeleteByUser(ctx context.Context, userID domain.UserID) er
 }
 
 // MagicLinkRepo is a Postgres domain.MagicLinkRepository.
-type MagicLinkRepo struct{ db ctxDB }
+type MagicLinkRepo struct{ db DB }
 
 // NewMagicLinkRepo builds a magic-link repository over db.
-func NewMagicLinkRepo(db ctxDB) *MagicLinkRepo { return &MagicLinkRepo{db: db} }
+func NewMagicLinkRepo(db DB) *MagicLinkRepo { return &MagicLinkRepo{db: db} }
 
 // Save inserts a magic link.
 func (r *MagicLinkRepo) Save(ctx context.Context, m domain.MagicLink) error {
@@ -114,10 +117,10 @@ func (r *MagicLinkRepo) MarkConsumed(ctx context.Context, hash string) error {
 }
 
 // PasskeyRepo is a Postgres domain.PasskeyRepository.
-type PasskeyRepo struct{ db ctxDB }
+type PasskeyRepo struct{ db DB }
 
 // NewPasskeyRepo builds a passkey repository over db.
-func NewPasskeyRepo(db ctxDB) *PasskeyRepo { return &PasskeyRepo{db: db} }
+func NewPasskeyRepo(db DB) *PasskeyRepo { return &PasskeyRepo{db: db} }
 
 // Add inserts a credential.
 func (r *PasskeyRepo) Add(ctx context.Context, c domain.PasskeyCredential) error {
@@ -193,10 +196,10 @@ func requireOneRow(res sql.Result) error {
 // LoginAttemptRepo is a Postgres domain.LoginAttemptStore. Callers SHOULD pass
 // a hashed key (e.g. hex SHA-256 of the email) so plaintext PII is never
 // persisted — this adapter stores the key verbatim.
-type LoginAttemptRepo struct{ db ctxDB }
+type LoginAttemptRepo struct{ db DB }
 
 // NewLoginAttemptRepo builds a login-attempt store over db.
-func NewLoginAttemptRepo(db ctxDB) *LoginAttemptRepo { return &LoginAttemptRepo{db: db} }
+func NewLoginAttemptRepo(db DB) *LoginAttemptRepo { return &LoginAttemptRepo{db: db} }
 
 // Get loads a key's state or returns domain.ErrNotFound.
 func (r *LoginAttemptRepo) Get(ctx context.Context, key string) (domain.LoginAttemptSnapshot, error) {
@@ -242,24 +245,13 @@ func (r *LoginAttemptRepo) Delete(ctx context.Context, key string) error {
 	return err
 }
 
-// ctxDB is the context-aware subset of *sql.DB the workload repo needs;
-// satisfied by *sql.DB and *sql.Tx. Unlike the package-wide DB interface (used
-// by the older ctx-free repos), it carries the *Context query methods so the
-// workload store propagates cancellation, deadlines, and OTel traces through
-// ctx — the correct contract for new storage I/O.
-type ctxDB interface {
-	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
-	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
-	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
-}
-
 // WorkloadKeyRepo is a Postgres domain.WorkloadStore. Only the hex SHA-256 hash
 // of each token is stored (the hash column is UNIQUE for the validation hot
 // path); the raw token is never persisted. Scope is stored as a TEXT[].
-type WorkloadKeyRepo struct{ db ctxDB }
+type WorkloadKeyRepo struct{ db DB }
 
 // NewWorkloadKeyRepo builds a workload-key repository over db.
-func NewWorkloadKeyRepo(db ctxDB) *WorkloadKeyRepo { return &WorkloadKeyRepo{db: db} }
+func NewWorkloadKeyRepo(db DB) *WorkloadKeyRepo { return &WorkloadKeyRepo{db: db} }
 
 // CreateKey inserts a new key, mapping a unique-violation to domain.ErrConflict.
 func (r *WorkloadKeyRepo) CreateKey(ctx context.Context, k domain.APIKey) error {
