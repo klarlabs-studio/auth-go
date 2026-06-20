@@ -306,6 +306,43 @@ func TestWorkloadKeyService_Validate(t *testing.T) {
 	}
 }
 
+// mismatchStore returns, for any GetKeyByHash lookup, a key whose stored hash
+// does NOT match the inbound token's hash — simulating a corrupted or attacker-
+// substituted row. ValidateKey must reject it via the constant-time check.
+type mismatchStore struct {
+	domain.WorkloadStore
+	key domain.APIKey
+}
+
+func (m *mismatchStore) GetKeyByHash(ctx context.Context, hash string) (domain.APIKey, error) {
+	return m.key, nil
+}
+
+func TestWorkloadKeyService_ValidateRejectsHashMismatch(t *testing.T) {
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	ctx := context.Background()
+
+	// Build a key whose stored hash is for some OTHER token.
+	otherTok, _ := domain.NewWorkloadToken()
+	storedKey := domain.APIKeyFromSnapshot(domain.APIKeySnapshot{
+		ID:        "wk_x",
+		Hash:      domain.HashWorkloadToken(otherTok),
+		WorkerID:  "agent-1",
+		Scope:     []string{"tools:*"},
+		ExpiresAt: now.Add(time.Hour),
+		CreatedAt: now,
+	})
+	ms := &mismatchStore{WorkloadStore: memory.NewWorkloadKeyRepo(), key: storedKey}
+	svc := domain.NewWorkloadKeyService(ms, fixedClock(&now))
+
+	// Validate with a DIFFERENT token: the store returns storedKey regardless,
+	// but its hash does not match the inbound token → ErrKeyNotFound.
+	inbound, _ := domain.NewWorkloadToken()
+	if _, err := svc.ValidateKey(ctx, inbound); !errors.Is(err, domain.ErrKeyNotFound) {
+		t.Fatalf("hash mismatch: want ErrKeyNotFound, got %v", err)
+	}
+}
+
 // ── WorkloadKeyService: authorize ───────────────────────────
 
 func TestWorkloadKeyService_Authorize(t *testing.T) {

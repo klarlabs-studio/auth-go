@@ -2,6 +2,7 @@ package domain
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"time"
 )
@@ -223,14 +224,24 @@ func (s *WorkloadKeyService) issue(req KeyRequest) (APIKey, WorkloadToken, error
 
 // ValidateKey hashes an inbound token, looks the key up, and enforces expiry,
 // returning the worker + scope claims. Returns ErrKeyNotFound for an unknown
-// token and ErrKeyExpired for an expired one.
+// token and ErrKeyExpired for an expired one. The lookup is keyed on the
+// SHA-256 of the token, so the row is already selected by token hash; the
+// constant-time re-comparison below is belt-and-suspenders consistency with the
+// rest of the library (password.go/totp.go), not the primary security boundary.
 func (s *WorkloadKeyService) ValidateKey(ctx context.Context, token WorkloadToken) (KeyClaims, error) {
-	key, err := s.store.GetKeyByHash(ctx, HashWorkloadToken(token))
+	want := HashWorkloadToken(token)
+	key, err := s.store.GetKeyByHash(ctx, want)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return KeyClaims{}, ErrKeyNotFound
 		}
 		return KeyClaims{}, err
+	}
+	// Re-verify the stored hash against the inbound token's hash in constant
+	// time; a mismatch (e.g. a corrupted or substituted row) is treated as an
+	// unknown key.
+	if subtle.ConstantTimeCompare([]byte(key.Hash()), []byte(want)) != 1 {
+		return KeyClaims{}, ErrKeyNotFound
 	}
 	if key.Expired(s.now()) {
 		return KeyClaims{}, ErrKeyExpired
