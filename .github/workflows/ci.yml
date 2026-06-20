@@ -23,3 +23,12 @@ jobs:
     with:
       cross-platform: false   # pure-logic lib; ubuntu is sufficient
       nox-strict: true        # repo is clean of high/critical — enforce, don't just report
+      # Pin nox >= 1.1.2. Earlier nox (the shared-workflow default at the time)
+      # shipped a deriveChecksumsURL that only stripped ".sig.bundle", so it
+      # could not verify the taint-analysis plugin's ".sigstore.json" cosign
+      # bundle — cosign was handed the bundle as the artifact and failed with
+      # "invalid signature when validating ASN.1 encoded signature", leaving the
+      # plugin "unverified" and breaking `nox scan`. v1.1.2+ strips
+      # ".sigstore.json" correctly. (Org-wide fix: bump the shared go-ci default.)
+      nox-version: "1.2.0"
+      nox-sha256: "75262d80314e879d7e755edeacab4c0bb8df83519322b82589b0745ccab489d5"
