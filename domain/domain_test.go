@@ -272,6 +272,102 @@ func TestSessionService_RevokeAll(t *testing.T) {
 	}
 }
 
+func TestSessionService_Rotate(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	repo := memory.NewSessionRepo()
+	svc := domain.NewSessionService(repo, time.Hour, fixedClock(&now))
+
+	old, err := svc.Issue(ctx, mustUserID(t, "u1"), mustTenantID(t, "t1"))
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+
+	// Advance the clock so a fresh expiry window is observable.
+	now = now.Add(10 * time.Minute)
+	fresh, err := svc.Rotate(ctx, old.Token())
+	if err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+
+	// New token differs from the old one.
+	if fresh.Token().String() == old.Token().String() {
+		t.Fatal("rotate reused the session token")
+	}
+	// New session preserves the principal and tenant.
+	if fresh.UserID().String() != "u1" || fresh.TenantID().String() != "t1" {
+		t.Fatalf("rotate lost identity: %+v", fresh.Snapshot())
+	}
+	// New session carries a fresh full lifetime from the rotation instant
+	// (session fixation: the lifetime restarts, it does not inherit the old one).
+	if !fresh.ExpiresAt().Equal(now.Add(time.Hour)) {
+		t.Fatalf("rotate did not reset lifetime: got %s want %s", fresh.ExpiresAt(), now.Add(time.Hour))
+	}
+
+	// Old token is invalidated.
+	if _, err := svc.Validate(ctx, old.Token()); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("old token survived rotate: %v", err)
+	}
+	// New token validates.
+	if _, err := svc.Validate(ctx, fresh.Token()); err != nil {
+		t.Fatalf("new token invalid: %v", err)
+	}
+
+	// Rotating an unknown token returns ErrNotFound and issues nothing.
+	unknown, _ := domain.TokenFromString("does-not-exist")
+	if _, err := svc.Rotate(ctx, unknown); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("rotate unknown: want ErrNotFound, got %v", err)
+	}
+
+	// Rotating an expired token returns ErrExpired and issues nothing.
+	stale, _ := svc.Issue(ctx, mustUserID(t, "u9"), mustTenantID(t, "t1"))
+	now = now.Add(2 * time.Hour)
+	if _, err := svc.Rotate(ctx, stale.Token()); !errors.Is(err, domain.ErrExpired) {
+		t.Fatalf("rotate expired: want ErrExpired, got %v", err)
+	}
+}
+
+// failSessionRepo wraps a SessionRepository and forces Delete to fail for a
+// specific token, to drive the Rotate rollback branch.
+type failSessionRepo struct {
+	domain.SessionRepository
+	failToken string
+	deleteErr error
+}
+
+func (f *failSessionRepo) Delete(ctx context.Context, token domain.Token) error {
+	if f.deleteErr != nil && token.String() == f.failToken {
+		return f.deleteErr
+	}
+	return f.SessionRepository.Delete(ctx, token)
+}
+
+func TestSessionService_RotateDeleteFailureRollsBack(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	base := memory.NewSessionRepo()
+	fr := &failSessionRepo{SessionRepository: base}
+	svc := domain.NewSessionService(fr, time.Hour, fixedClock(&now))
+
+	old, err := svc.Issue(ctx, mustUserID(t, "u1"), mustTenantID(t, "t1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sentinel := errors.New("db down")
+	fr.failToken = old.Token().String()
+	fr.deleteErr = sentinel
+
+	if _, err := svc.Rotate(ctx, old.Token()); !errors.Is(err, sentinel) {
+		t.Fatalf("rotate delete error: want sentinel, got %v", err)
+	}
+	fr.deleteErr = nil
+
+	// The new session was rolled back; only the old one remains.
+	if _, err := svc.Validate(ctx, old.Token()); err != nil {
+		t.Fatalf("old session lost after failed rotate: %v", err)
+	}
+}
+
 func TestSessionService_RejectsZeroIDs(t *testing.T) {
 	ctx := context.Background()
 	svc := domain.NewSessionService(memory.NewSessionRepo(), time.Hour, nil)

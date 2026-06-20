@@ -75,6 +75,36 @@ func (s *SessionService) Validate(ctx context.Context, token Token) (Session, er
 	return sess, nil
 }
 
+// Rotate re-issues a session: it validates oldToken, issues a fresh session for
+// the same user and tenant with a new token and a full lifetime measured from
+// now, persists it, and then deletes the old token — mitigating session
+// fixation by ensuring the post-authentication token is never one an attacker
+// could have planted earlier.
+//
+// It returns the new Session. An unknown old token yields ErrNotFound and an
+// expired one ErrExpired (the expired session is purged, as in Validate); in
+// both cases nothing new is issued. The new session is created before the old
+// one is deleted, so a crash between the two steps leaves the old token briefly
+// live rather than leaving the caller with no session at all; the old token is
+// always invalidated on the success path.
+func (s *SessionService) Rotate(ctx context.Context, oldToken Token) (Session, error) {
+	old, err := s.Validate(ctx, oldToken)
+	if err != nil {
+		return Session{}, err
+	}
+	fresh, err := s.Issue(ctx, old.userID, old.tenantID)
+	if err != nil {
+		return Session{}, err
+	}
+	if err := s.repo.Delete(ctx, oldToken); err != nil {
+		// Roll back the just-issued session so a failed rotation does not leave
+		// two live tokens; best-effort cleanup, original delete error surfaced.
+		_ = s.repo.Delete(ctx, fresh.token)
+		return Session{}, err
+	}
+	return fresh, nil
+}
+
 // Revoke deletes one session (logout).
 func (s *SessionService) Revoke(ctx context.Context, token Token) error {
 	return s.repo.Delete(ctx, token)
