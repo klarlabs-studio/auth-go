@@ -38,7 +38,13 @@ func (m MagicLink) Expired(now time.Time) bool { return !now.Before(m.expiresAt)
 // HashToken returns the hex SHA-256 of a raw token — the storage key. Exposed
 // so services and adapters agree on the keying without duplicating it.
 func HashToken(raw Token) string {
-	sum := sha256.Sum256([]byte(raw.v))
+	return hashString(raw.v)
+}
+
+// hashString returns the hex SHA-256 of s. Shared by the token-hashing helpers
+// so the keying is defined in exactly one place.
+func hashString(s string) string {
+	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
 }
 

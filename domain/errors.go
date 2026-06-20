@@ -7,6 +7,7 @@ import "errors"
 var (
 	// Persistence-shape errors (returned by repository ports).
 	ErrNotFound = errors.New("authgo: not found")
+	ErrConflict = errors.New("authgo: already exists")
 
 	// Lifecycle errors.
 	ErrExpired  = errors.New("authgo: expired")
@@ -28,4 +29,13 @@ var (
 	ErrInvalidToken    = errors.New("authgo: invalid token")
 	ErrInvalidSecret   = errors.New("authgo: invalid TOTP secret")
 	ErrInvalidHash     = errors.New("authgo: invalid password hash")
+
+	// Workload (scoped agent API key) errors.
+	ErrInvalidWorkerID = errors.New("authgo: invalid worker id")
+	ErrInvalidScope    = errors.New("authgo: invalid scope")
+	ErrInvalidExpiry   = errors.New("authgo: invalid key expiry")
+	ErrInvalidKeyToken = errors.New("authgo: invalid key token")
+	ErrKeyNotFound     = errors.New("authgo: key not found")
+	ErrKeyExpired      = errors.New("authgo: key expired")
+	ErrScopeDenied     = errors.New("authgo: scope denied")
 )

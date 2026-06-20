@@ -4,6 +4,7 @@
 package memory
 
 import (
+	"context"
 	"sync"
 
 	"github.com/klarlabs-studio/auth-go/domain"
@@ -194,10 +195,112 @@ func (r *LoginAttemptRepo) Delete(key string) error {
 	return nil
 }
 
+// WorkloadKeyRepo is an in-memory domain.WorkloadStore. It indexes keys by both
+// ID and token hash so the validation hot path (GetKeyByHash) is O(1) without
+// scanning. The two maps are kept consistent under a single lock.
+type WorkloadKeyRepo struct {
+	mu     sync.RWMutex
+	byID   map[string]domain.APIKeySnapshot
+	byHash map[string]string // hash -> id
+}
+
+// NewWorkloadKeyRepo returns an empty workload-key store.
+func NewWorkloadKeyRepo() *WorkloadKeyRepo {
+	return &WorkloadKeyRepo{
+		byID:   make(map[string]domain.APIKeySnapshot),
+		byHash: make(map[string]string),
+	}
+}
+
+// CreateKey inserts a new key, rejecting a duplicate ID or hash.
+func (r *WorkloadKeyRepo) CreateKey(ctx context.Context, k domain.APIKey) error {
+	// Best-effort entry guard: the in-memory store does no blocking I/O, so
+	// there is no mid-operation cancellation point. Checking ctx.Err() up front
+	// only honors an already-cancelled context for parity with the WorkloadStore
+	// contract — it is not a cancellation guarantee mid-flight. The same applies
+	// to every ctx.Err() guard in this repo.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	snap := k.Snapshot()
+	if _, exists := r.byID[snap.ID]; exists {
+		return domain.ErrConflict
+	}
+	if _, exists := r.byHash[snap.Hash]; exists {
+		return domain.ErrConflict
+	}
+	r.byID[snap.ID] = snap
+	r.byHash[snap.Hash] = snap.ID
+	return nil
+}
+
+// GetKeyByHash returns the key for a token hash or domain.ErrNotFound.
+func (r *WorkloadKeyRepo) GetKeyByHash(ctx context.Context, hash string) (domain.APIKey, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.APIKey{}, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	id, ok := r.byHash[hash]
+	if !ok {
+		return domain.APIKey{}, domain.ErrNotFound
+	}
+	return domain.APIKeyFromSnapshot(r.byID[id]), nil
+}
+
+// GetKey returns the key for an ID or domain.ErrNotFound.
+func (r *WorkloadKeyRepo) GetKey(ctx context.Context, id domain.KeyID) (domain.APIKey, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.APIKey{}, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	snap, ok := r.byID[id.String()]
+	if !ok {
+		return domain.APIKey{}, domain.ErrNotFound
+	}
+	return domain.APIKeyFromSnapshot(snap), nil
+}
+
+// ListKeysByWorker returns every key for a worker.
+func (r *WorkloadKeyRepo) ListKeysByWorker(ctx context.Context, workerID domain.WorkerID) ([]domain.APIKey, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []domain.APIKey
+	for _, snap := range r.byID {
+		if snap.WorkerID == workerID.String() {
+			out = append(out, domain.APIKeyFromSnapshot(snap))
+		}
+	}
+	return out, nil
+}
+
+// DeleteKey removes a key by ID. Deleting an absent key returns ErrNotFound.
+func (r *WorkloadKeyRepo) DeleteKey(ctx context.Context, id domain.KeyID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	snap, ok := r.byID[id.String()]
+	if !ok {
+		return domain.ErrNotFound
+	}
+	delete(r.byID, snap.ID)
+	delete(r.byHash, snap.Hash)
+	return nil
+}
+
 // Port assertions.
 var (
 	_ domain.SessionRepository   = (*SessionRepo)(nil)
 	_ domain.MagicLinkRepository = (*MagicLinkRepo)(nil)
 	_ domain.PasskeyRepository   = (*PasskeyRepo)(nil)
 	_ domain.LoginAttemptStore   = (*LoginAttemptRepo)(nil)
+	_ domain.WorkloadStore       = (*WorkloadKeyRepo)(nil)
 )

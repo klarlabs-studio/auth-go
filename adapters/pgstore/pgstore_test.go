@@ -1,6 +1,7 @@
 package pgstore_test
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"os"
@@ -35,7 +36,7 @@ func openTestDB(t *testing.T) *sql.DB {
 	if _, err := db.Exec(string(schema)); err != nil {
 		t.Fatalf("apply schema: %v", err)
 	}
-	for _, tbl := range []string{"authgo_sessions", "authgo_magic_links", "authgo_passkeys", "authgo_login_attempts"} {
+	for _, tbl := range []string{"authgo_sessions", "authgo_magic_links", "authgo_passkeys", "authgo_login_attempts", "authgo_workload_keys"} {
 		if _, err := db.Exec("TRUNCATE " + tbl); err != nil {
 			t.Fatalf("truncate %s: %v", tbl, err)
 		}
@@ -149,5 +150,99 @@ func TestPasskeyRepo_Integration(t *testing.T) {
 	final, _ := repo.ListByUser(u)
 	if len(final) != 0 {
 		t.Fatalf("delete left rows: %+v", final)
+	}
+}
+
+func wid(t *testing.T, s string) domain.WorkerID {
+	t.Helper()
+	id, err := domain.NewWorkerID(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func scope(t *testing.T, actions ...string) domain.Scope {
+	t.Helper()
+	sc, err := domain.NewScope(actions...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sc
+}
+
+func TestWorkloadKeyRepo_Integration(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	repo := pgstore.NewWorkloadKeyRepo(db)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	svc := domain.NewWorkloadKeyService(repo, func() time.Time { return now })
+	w := wid(t, "agent-1")
+
+	key, raw, err := svc.IssueKey(ctx, domain.KeyRequest{
+		WorkerID:  w,
+		Scope:     scope(t, "tools:*", "memory:read"),
+		ExpiresAt: now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+
+	// Validate + authorize round-trip through Postgres.
+	claims, err := svc.ValidateKey(ctx, raw)
+	if err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if claims.WorkerID.String() != "agent-1" {
+		t.Fatalf("worker mismatch: %v", claims.WorkerID)
+	}
+	if err := svc.Authorize(ctx, raw, "tools:write"); err != nil {
+		t.Fatalf("authorize wildcard: %v", err)
+	}
+	if err := svc.Authorize(ctx, raw, "memory:write"); !errors.Is(err, domain.ErrScopeDenied) {
+		t.Fatalf("authorize no-match: want ErrScopeDenied, got %v", err)
+	}
+
+	// Scope persisted and rehydrated intact.
+	got, err := repo.GetKey(ctx, key.ID())
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if len(got.Scope().Actions()) != 2 {
+		t.Fatalf("scope lost across pg: %+v", got.Scope().Actions())
+	}
+
+	// Duplicate hash → ErrConflict.
+	if err := repo.CreateKey(ctx, key); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("duplicate: want ErrConflict, got %v", err)
+	}
+
+	// Rotate: old invalid, new valid.
+	newKey, newRaw, err := svc.RotateKey(ctx, key.ID())
+	if err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	if _, err := svc.ValidateKey(ctx, raw); !errors.Is(err, domain.ErrKeyNotFound) {
+		t.Fatalf("old token survived rotate: %v", err)
+	}
+	if _, err := svc.ValidateKey(ctx, newRaw); err != nil {
+		t.Fatalf("new token invalid: %v", err)
+	}
+
+	// List, then revoke-all.
+	list, err := repo.ListKeysByWorker(ctx, w)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("list after rotate: %v / %d", err, len(list))
+	}
+	if err := svc.RevokeAllKeys(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.GetKey(ctx, newKey.ID()); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("revoke-all missed key: %v", err)
+	}
+
+	// Delete unknown → ErrNotFound.
+	if err := repo.DeleteKey(ctx, domain.KeyID("nope")); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("delete unknown: want ErrNotFound, got %v", err)
 	}
 }
