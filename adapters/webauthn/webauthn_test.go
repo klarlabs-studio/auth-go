@@ -1,6 +1,7 @@
 package webauthn_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -35,7 +36,7 @@ func mustUser(t *testing.T, s string) domain.UserID {
 
 func TestBeginRegistration_ValidOptions(t *testing.T) {
 	a, _ := newAuth(t)
-	options, state, err := a.BeginRegistration(mustUser(t, "u1"), "Felix")
+	options, state, err := a.BeginRegistration(context.Background(), mustUser(t, "u1"), "Felix")
 	if err != nil {
 		t.Fatalf("begin registration: %v", err)
 	}
@@ -53,20 +54,21 @@ func TestBeginRegistration_ValidOptions(t *testing.T) {
 
 func TestBeginLogin_NoPasskeys(t *testing.T) {
 	a, _ := newAuth(t)
-	if _, _, err := a.BeginLogin(mustUser(t, "nobody")); !errors.Is(err, webauthn.ErrNoPasskeys) {
+	if _, _, err := a.BeginLogin(context.Background(), mustUser(t, "nobody")); !errors.Is(err, webauthn.ErrNoPasskeys) {
 		t.Fatalf("want ErrNoPasskeys, got %v", err)
 	}
 }
 
 func TestBeginLogin_WithCredential(t *testing.T) {
+	ctx := context.Background()
 	a, repo := newAuth(t)
 	u := mustUser(t, "u2")
-	if err := repo.Add(domain.PasskeyCredential{
+	if err := repo.Add(ctx, domain.PasskeyCredential{
 		ID: []byte{1, 2, 3, 4}, UserID: u, PublicKey: []byte{5, 6, 7, 8}, Name: "Key",
 	}); err != nil {
 		t.Fatal(err)
 	}
-	opts, _, err := a.BeginLogin(u)
+	opts, _, err := a.BeginLogin(ctx, u)
 	if err != nil {
 		t.Fatalf("begin login: %v", err)
 	}

@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // Session is an aggregate: an authenticated server-side session. The opaque
 // Token rides in an HttpOnly cookie; everything else stays server-side.
@@ -71,10 +74,11 @@ func SessionFromSnapshot(s SessionSnapshot) Session {
 }
 
 // SessionRepository is the persistence port for sessions. Implementations must
-// be safe for concurrent use.
+// be safe for concurrent use. Every method takes a context.Context first so
+// storage I/O honors cancellation, deadlines, and trace propagation.
 type SessionRepository interface {
-	Save(s Session) error
-	FindByToken(token Token) (Session, error)
-	Delete(token Token) error
-	DeleteByUser(userID UserID) error
+	Save(ctx context.Context, s Session) error
+	FindByToken(ctx context.Context, token Token) (Session, error)
+	Delete(ctx context.Context, token Token) error
+	DeleteByUser(ctx context.Context, userID UserID) error
 }

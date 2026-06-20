@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"time"
@@ -79,9 +80,11 @@ func MagicLinkFromSnapshot(s MagicLinkSnapshot) MagicLink {
 	}
 }
 
-// MagicLinkRepository is the persistence port for magic links.
+// MagicLinkRepository is the persistence port for magic links. Every method
+// takes a context.Context first so storage I/O honors cancellation, deadlines,
+// and trace propagation.
 type MagicLinkRepository interface {
-	Save(m MagicLink) error
-	FindByHash(hash string) (MagicLink, error)
-	MarkConsumed(hash string) error
+	Save(ctx context.Context, m MagicLink) error
+	FindByHash(ctx context.Context, hash string) (MagicLink, error)
+	MarkConsumed(ctx context.Context, hash string) error
 }

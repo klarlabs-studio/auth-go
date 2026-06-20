@@ -151,7 +151,7 @@ func (m *BasicAuthMiddleware) Middleware(next http.Handler) http.Handler {
 			m.challenge(w)
 			return
 		}
-		sess, err := m.sessions.Issue(uid, tid)
+		sess, err := m.sessions.Issue(r.Context(), uid, tid)
 		if err != nil {
 			http.Error(w, "could not establish session", http.StatusInternalServerError)
 			return
@@ -173,7 +173,7 @@ func (m *BasicAuthMiddleware) sessionFromCookie(r *http.Request) (domain.Session
 	if err != nil {
 		return domain.Session{}, false
 	}
-	sess, err := m.sessions.Validate(tok)
+	sess, err := m.sessions.Validate(r.Context(), tok)
 	if err != nil {
 		return domain.Session{}, false
 	}

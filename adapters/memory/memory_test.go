@@ -48,101 +48,105 @@ func tid(t *testing.T, s string) domain.TenantID {
 }
 
 func TestSessionRepo(t *testing.T) {
+	ctx := context.Background()
 	repo := memory.NewSessionRepo()
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
 	svc := domain.NewSessionService(repo, time.Hour, func() time.Time { return now })
 
-	s, err := svc.Issue(uid(t, "u1"), tid(t, "t1"))
+	s, err := svc.Issue(ctx, uid(t, "u1"), tid(t, "t1"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := repo.FindByToken(s.Token())
+	got, err := repo.FindByToken(ctx, s.Token())
 	if err != nil || got.UserID().String() != "u1" {
 		t.Fatalf("find: %v / %+v", err, got.Snapshot())
 	}
-	if err := repo.Delete(s.Token()); err != nil {
+	if err := repo.Delete(ctx, s.Token()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repo.FindByToken(s.Token()); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := repo.FindByToken(ctx, s.Token()); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("after delete: want ErrNotFound, got %v", err)
 	}
 
-	a, _ := svc.Issue(uid(t, "u2"), tid(t, "t2"))
-	b, _ := svc.Issue(uid(t, "u2"), tid(t, "t2"))
-	if err := repo.DeleteByUser(uid(t, "u2")); err != nil {
+	a, _ := svc.Issue(ctx, uid(t, "u2"), tid(t, "t2"))
+	b, _ := svc.Issue(ctx, uid(t, "u2"), tid(t, "t2"))
+	if err := repo.DeleteByUser(ctx, uid(t, "u2")); err != nil {
 		t.Fatal(err)
 	}
 	for _, tok := range []domain.Token{a.Token(), b.Token()} {
-		if _, err := repo.FindByToken(tok); !errors.Is(err, domain.ErrNotFound) {
+		if _, err := repo.FindByToken(ctx, tok); !errors.Is(err, domain.ErrNotFound) {
 			t.Fatal("DeleteByUser missed a session")
 		}
 	}
 }
 
 func TestMagicLinkRepo(t *testing.T) {
+	ctx := context.Background()
 	repo := memory.NewMagicLinkRepo()
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
 	svc := domain.NewMagicLinkService(repo, 15*time.Minute, func() time.Time { return now })
 	email, _ := domain.NewEmail("a@b.co")
 
-	raw, err := svc.Issue(email, tid(t, "t1"))
+	raw, err := svc.Issue(ctx, email, tid(t, "t1"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	link, err := svc.Consume(raw)
+	link, err := svc.Consume(ctx, raw)
 	if err != nil || link.Email().String() != "a@b.co" {
 		t.Fatalf("consume: %v / %+v", err, link.Snapshot())
 	}
-	if err := repo.MarkConsumed("does-not-exist"); !errors.Is(err, domain.ErrNotFound) {
+	if err := repo.MarkConsumed(ctx, "does-not-exist"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("mark unknown: want ErrNotFound, got %v", err)
 	}
 }
 
 func TestPasskeyRepo(t *testing.T) {
+	ctx := context.Background()
 	repo := memory.NewPasskeyRepo()
 	u := uid(t, "u1")
-	_ = repo.Add(domain.PasskeyCredential{ID: []byte{1}, UserID: u, Name: "K"})
-	got, _ := repo.ListByUser(u)
+	_ = repo.Add(ctx, domain.PasskeyCredential{ID: []byte{1}, UserID: u, Name: "K"})
+	got, _ := repo.ListByUser(ctx, u)
 	if len(got) != 1 {
 		t.Fatalf("list: %+v", got)
 	}
-	if err := repo.UpdateSignCount([]byte{1}, 5); err != nil {
+	if err := repo.UpdateSignCount(ctx, []byte{1}, 5); err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.UpdateSignCount([]byte{9}, 5); !errors.Is(err, domain.ErrNotFound) {
+	if err := repo.UpdateSignCount(ctx, []byte{9}, 5); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("unknown: want ErrNotFound, got %v", err)
 	}
-	_ = repo.Delete([]byte{1})
-	final, _ := repo.ListByUser(u)
+	_ = repo.Delete(ctx, []byte{1})
+	final, _ := repo.ListByUser(ctx, u)
 	if len(final) != 0 {
 		t.Fatal("delete failed")
 	}
 }
 
 func TestLoginAttemptRepo(t *testing.T) {
+	ctx := context.Background()
 	repo := memory.NewLoginAttemptRepo()
 	key := "k"
 
 	// Unknown key → ErrNotFound.
-	if _, err := repo.Get(key); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := repo.Get(ctx, key); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("unknown: want ErrNotFound, got %v", err)
 	}
 
 	until := time.Date(2026, 6, 8, 12, 15, 0, 0, time.UTC)
-	if err := repo.Save(domain.LoginAttemptSnapshot{Key: key, FailureCount: 5, LockedUntil: until}); err != nil {
+	if err := repo.Save(ctx, domain.LoginAttemptSnapshot{Key: key, FailureCount: 5, LockedUntil: until}); err != nil {
 		t.Fatal(err)
 	}
-	got, err := repo.Get(key)
+	got, err := repo.Get(ctx, key)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.FailureCount != 5 || !got.LockedUntil.Equal(until) {
 		t.Fatalf("roundtrip: %+v", got)
 	}
-	if err := repo.Delete(key); err != nil {
+	if err := repo.Delete(ctx, key); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repo.Get(key); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := repo.Get(ctx, key); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("after delete: want ErrNotFound, got %v", err)
 	}
 }

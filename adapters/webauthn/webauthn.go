@@ -6,6 +6,7 @@ package webauthn
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 
@@ -60,8 +61,8 @@ func (u *waUser) WebAuthnName() string                       { return u.name }
 func (u *waUser) WebAuthnDisplayName() string                { return u.displayName }
 func (u *waUser) WebAuthnCredentials() []webauthn.Credential { return u.creds }
 
-func (a *Authenticator) loadUser(userID domain.UserID, displayName string) (*waUser, error) {
-	stored, err := a.repo.ListByUser(userID)
+func (a *Authenticator) loadUser(ctx context.Context, userID domain.UserID, displayName string) (*waUser, error) {
+	stored, err := a.repo.ListByUser(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -82,8 +83,8 @@ func (a *Authenticator) loadUser(userID domain.UserID, displayName string) (*waU
 
 // BeginRegistration starts enrolling a new passkey, returning JSON options for
 // navigator.credentials.create and opaque state to round-trip.
-func (a *Authenticator) BeginRegistration(userID domain.UserID, displayName string) (options, state []byte, err error) {
-	user, err := a.loadUser(userID, displayName)
+func (a *Authenticator) BeginRegistration(ctx context.Context, userID domain.UserID, displayName string) (options, state []byte, err error) {
+	user, err := a.loadUser(ctx, userID, displayName)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -96,7 +97,10 @@ func (a *Authenticator) BeginRegistration(userID domain.UserID, displayName stri
 
 // FinishRegistration verifies the browser response and returns the credential
 // to persist via PasskeyRepository.Add.
-func (a *Authenticator) FinishRegistration(state, response []byte) (domain.PasskeyCredential, error) {
+// The context is accepted to satisfy the port and keep the ceremony signatures
+// uniform; this step does no storage I/O (it only verifies the browser
+// response), so ctx is currently unused here.
+func (a *Authenticator) FinishRegistration(_ context.Context, state, response []byte) (domain.PasskeyCredential, error) {
 	var session webauthn.SessionData
 	if err := json.Unmarshal(state, &session); err != nil {
 		return domain.PasskeyCredential{}, err
@@ -123,8 +127,8 @@ func (a *Authenticator) FinishRegistration(state, response []byte) (domain.Passk
 }
 
 // BeginLogin starts an assertion for a user's known credentials.
-func (a *Authenticator) BeginLogin(userID domain.UserID) (options, state []byte, err error) {
-	user, err := a.loadUser(userID, "")
+func (a *Authenticator) BeginLogin(ctx context.Context, userID domain.UserID) (options, state []byte, err error) {
+	user, err := a.loadUser(ctx, userID, "")
 	if err != nil {
 		return nil, nil, err
 	}
@@ -140,7 +144,7 @@ func (a *Authenticator) BeginLogin(userID domain.UserID) (options, state []byte,
 
 // FinishLogin verifies the assertion, advances the stored sign count, and
 // returns the credential ID that signed.
-func (a *Authenticator) FinishLogin(state, response []byte) (credentialID []byte, err error) {
+func (a *Authenticator) FinishLogin(ctx context.Context, state, response []byte) (credentialID []byte, err error) {
 	var session webauthn.SessionData
 	if err := json.Unmarshal(state, &session); err != nil {
 		return nil, err
@@ -149,7 +153,7 @@ func (a *Authenticator) FinishLogin(state, response []byte) (credentialID []byte
 	if err != nil {
 		return nil, err
 	}
-	user, err := a.loadUser(uid, "")
+	user, err := a.loadUser(ctx, uid, "")
 	if err != nil {
 		return nil, err
 	}
@@ -161,7 +165,7 @@ func (a *Authenticator) FinishLogin(state, response []byte) (credentialID []byte
 	if err != nil {
 		return nil, err
 	}
-	if err := a.repo.UpdateSignCount(cred.ID, cred.Authenticator.SignCount); err != nil {
+	if err := a.repo.UpdateSignCount(ctx, cred.ID, cred.Authenticator.SignCount); err != nil {
 		return nil, err
 	}
 	return cred.ID, nil

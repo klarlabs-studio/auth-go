@@ -1,6 +1,7 @@
 package domain_test
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -164,61 +165,64 @@ func TestTOTP_SecretValidationAndURI(t *testing.T) {
 // ── Session service ─────────────────────────────────────────
 
 func TestSessionService_Lifecycle(t *testing.T) {
+	ctx := context.Background()
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
 	repo := memory.NewSessionRepo()
 	svc := domain.NewSessionService(repo, time.Hour, fixedClock(&now))
 
-	s, err := svc.Issue(mustUserID(t, "u1"), mustTenantID(t, "t1"))
+	s, err := svc.Issue(ctx, mustUserID(t, "u1"), mustTenantID(t, "t1"))
 	if err != nil {
 		t.Fatalf("issue: %v", err)
 	}
 	if s.UserID().String() != "u1" || s.TenantID().String() != "t1" {
 		t.Fatalf("unexpected session: %+v", s.Snapshot())
 	}
-	got, err := svc.Validate(s.Token())
+	got, err := svc.Validate(ctx, s.Token())
 	if err != nil || got.UserID().String() != "u1" {
 		t.Fatalf("validate: %v / %+v", err, got.Snapshot())
 	}
 
 	// expiry purges
 	now = now.Add(2 * time.Hour)
-	if _, err := svc.Validate(s.Token()); !errors.Is(err, domain.ErrExpired) {
+	if _, err := svc.Validate(ctx, s.Token()); !errors.Is(err, domain.ErrExpired) {
 		t.Fatalf("want ErrExpired, got %v", err)
 	}
-	if _, err := repo.FindByToken(s.Token()); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := repo.FindByToken(ctx, s.Token()); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("expired not purged: %v", err)
 	}
 }
 
 func TestSessionService_RevokeAll(t *testing.T) {
+	ctx := context.Background()
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
 	svc := domain.NewSessionService(memory.NewSessionRepo(), time.Hour, fixedClock(&now))
 	u := mustUserID(t, "u")
 	tn := mustTenantID(t, "t")
-	s1, _ := svc.Issue(u, tn)
-	s2, _ := svc.Issue(u, tn)
-	other, _ := svc.Issue(mustUserID(t, "other"), tn)
+	s1, _ := svc.Issue(ctx, u, tn)
+	s2, _ := svc.Issue(ctx, u, tn)
+	other, _ := svc.Issue(ctx, mustUserID(t, "other"), tn)
 
-	if err := svc.RevokeAll(u); err != nil {
+	if err := svc.RevokeAll(ctx, u); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Validate(s1.Token()); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := svc.Validate(ctx, s1.Token()); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatal("s1 survived revoke-all")
 	}
-	if _, err := svc.Validate(s2.Token()); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := svc.Validate(ctx, s2.Token()); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatal("s2 survived revoke-all")
 	}
-	if _, err := svc.Validate(other.Token()); err != nil {
+	if _, err := svc.Validate(ctx, other.Token()); err != nil {
 		t.Fatalf("revoke-all hit another user: %v", err)
 	}
 }
 
 func TestSessionService_RejectsZeroIDs(t *testing.T) {
+	ctx := context.Background()
 	svc := domain.NewSessionService(memory.NewSessionRepo(), time.Hour, nil)
-	if _, err := svc.Issue(domain.UserID{}, mustTenantID(t, "t")); !errors.Is(err, domain.ErrInvalidUserID) {
+	if _, err := svc.Issue(ctx, domain.UserID{}, mustTenantID(t, "t")); !errors.Is(err, domain.ErrInvalidUserID) {
 		t.Fatalf("want ErrInvalidUserID, got %v", err)
 	}
-	if _, err := svc.Issue(mustUserID(t, "u"), domain.TenantID{}); !errors.Is(err, domain.ErrInvalidTenantID) {
+	if _, err := svc.Issue(ctx, mustUserID(t, "u"), domain.TenantID{}); !errors.Is(err, domain.ErrInvalidTenantID) {
 		t.Fatalf("want ErrInvalidTenantID, got %v", err)
 	}
 }
@@ -226,47 +230,50 @@ func TestSessionService_RejectsZeroIDs(t *testing.T) {
 // ── Magic link service ──────────────────────────────────────
 
 func TestMagicLinkService_SingleUse(t *testing.T) {
+	ctx := context.Background()
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
 	repo := memory.NewMagicLinkRepo()
 	svc := domain.NewMagicLinkService(repo, 15*time.Minute, fixedClock(&now))
 
-	raw, err := svc.Issue(mustEmail(t, "felix@klarlabs.de"), mustTenantID(t, "t1"))
+	raw, err := svc.Issue(ctx, mustEmail(t, "felix@klarlabs.de"), mustTenantID(t, "t1"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	// raw token is not the storage key
-	if _, err := repo.FindByHash(raw.String()); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := repo.FindByHash(ctx, raw.String()); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatal("raw token used as key — must be hashed")
 	}
-	link, err := svc.Consume(raw)
+	link, err := svc.Consume(ctx, raw)
 	if err != nil {
 		t.Fatalf("consume: %v", err)
 	}
 	if link.Email().String() != "felix@klarlabs.de" {
 		t.Fatalf("unexpected link: %+v", link.Snapshot())
 	}
-	if _, err := svc.Consume(raw); !errors.Is(err, domain.ErrConsumed) {
+	if _, err := svc.Consume(ctx, raw); !errors.Is(err, domain.ErrConsumed) {
 		t.Fatalf("reuse: want ErrConsumed, got %v", err)
 	}
 }
 
 func TestMagicLinkService_Expiry(t *testing.T) {
+	ctx := context.Background()
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
 	svc := domain.NewMagicLinkService(memory.NewMagicLinkRepo(), 15*time.Minute, fixedClock(&now))
-	raw, _ := svc.Issue(mustEmail(t, "a@b.co"), mustTenantID(t, "t"))
+	raw, _ := svc.Issue(ctx, mustEmail(t, "a@b.co"), mustTenantID(t, "t"))
 	now = now.Add(16 * time.Minute)
-	if _, err := svc.Consume(raw); !errors.Is(err, domain.ErrExpired) {
+	if _, err := svc.Consume(ctx, raw); !errors.Is(err, domain.ErrExpired) {
 		t.Fatalf("want ErrExpired, got %v", err)
 	}
 }
 
 func TestMagicLinkService_UnknownAndZeroTenant(t *testing.T) {
+	ctx := context.Background()
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
 	svc := domain.NewMagicLinkService(memory.NewMagicLinkRepo(), 15*time.Minute, fixedClock(&now))
-	if _, err := svc.Consume(domain.Token{}); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := svc.Consume(ctx, domain.Token{}); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("unknown: want ErrNotFound, got %v", err)
 	}
-	if _, err := svc.Issue(mustEmail(t, "a@b.co"), domain.TenantID{}); !errors.Is(err, domain.ErrInvalidTenantID) {
+	if _, err := svc.Issue(ctx, mustEmail(t, "a@b.co"), domain.TenantID{}); !errors.Is(err, domain.ErrInvalidTenantID) {
 		t.Fatalf("zero tenant: want ErrInvalidTenantID, got %v", err)
 	}
 }
@@ -274,32 +281,33 @@ func TestMagicLinkService_UnknownAndZeroTenant(t *testing.T) {
 // ── Passkey repo (memory adapter) ───────────────────────────
 
 func TestPasskeyRepo(t *testing.T) {
+	ctx := context.Background()
 	repo := memory.NewPasskeyRepo()
 	u := mustUserID(t, "u1")
-	if err := repo.Add(domain.PasskeyCredential{ID: []byte{1, 2, 3}, UserID: u, Name: "Key"}); err != nil {
+	if err := repo.Add(ctx, domain.PasskeyCredential{ID: []byte{1, 2, 3}, UserID: u, Name: "Key"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.Add(domain.PasskeyCredential{ID: []byte{4}, UserID: mustUserID(t, "other")}); err != nil {
+	if err := repo.Add(ctx, domain.PasskeyCredential{ID: []byte{4}, UserID: mustUserID(t, "other")}); err != nil {
 		t.Fatal(err)
 	}
-	got, _ := repo.ListByUser(u)
+	got, _ := repo.ListByUser(ctx, u)
 	if len(got) != 1 || got[0].Name != "Key" {
 		t.Fatalf("listbyuser: %+v", got)
 	}
-	if err := repo.UpdateSignCount([]byte{1, 2, 3}, 42); err != nil {
+	if err := repo.UpdateSignCount(ctx, []byte{1, 2, 3}, 42); err != nil {
 		t.Fatal(err)
 	}
-	again, _ := repo.ListByUser(u)
+	again, _ := repo.ListByUser(ctx, u)
 	if again[0].SignCount != 42 {
 		t.Fatalf("sign count: %d", again[0].SignCount)
 	}
-	if err := repo.UpdateSignCount([]byte{9}, 1); !errors.Is(err, domain.ErrNotFound) {
+	if err := repo.UpdateSignCount(ctx, []byte{9}, 1); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("unknown: want ErrNotFound, got %v", err)
 	}
-	if err := repo.Delete([]byte{1, 2, 3}); err != nil {
+	if err := repo.Delete(ctx, []byte{1, 2, 3}); err != nil {
 		t.Fatal(err)
 	}
-	final, _ := repo.ListByUser(u)
+	final, _ := repo.ListByUser(ctx, u)
 	if len(final) != 0 {
 		t.Fatalf("delete failed: %+v", final)
 	}

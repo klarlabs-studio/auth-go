@@ -1,6 +1,7 @@
 package domain_test
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -79,6 +80,7 @@ func TestLockoutPolicy_LockedUntil(t *testing.T) {
 // ── LockoutService over the LoginAttemptStore port ──────────
 
 func TestLockoutService_LocksAfterThreshold(t *testing.T) {
+	ctx := context.Background()
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
 	store := memory.NewLoginAttemptRepo()
 	svc := domain.NewLockoutService(store, domain.DefaultLockoutPolicy(), fixedClock(&now))
@@ -86,76 +88,79 @@ func TestLockoutService_LocksAfterThreshold(t *testing.T) {
 	key := "felix@klarlabs.de"
 
 	for i := 1; i <= 4; i++ {
-		locked, err := svc.RecordFailure(key)
+		locked, err := svc.RecordFailure(ctx, key)
 		if err != nil {
 			t.Fatalf("failure %d: %v", i, err)
 		}
 		if locked {
 			t.Fatalf("locked too early at failure %d", i)
 		}
-		if l, _ := svc.IsLocked(key); l {
+		if l, _ := svc.IsLocked(ctx, key); l {
 			t.Fatalf("IsLocked true too early at failure %d", i)
 		}
 	}
 
-	locked, err := svc.RecordFailure(key)
+	locked, err := svc.RecordFailure(ctx, key)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !locked {
 		t.Fatal("want locked on 5th failure")
 	}
-	if l, _ := svc.IsLocked(key); !l {
+	if l, _ := svc.IsLocked(ctx, key); !l {
 		t.Fatal("IsLocked should be true after threshold")
 	}
 }
 
 func TestLockoutService_GuardReturnsErrAccountLocked(t *testing.T) {
+	ctx := context.Background()
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
 	store := memory.NewLoginAttemptRepo()
 	svc := domain.NewLockoutService(store, domain.DefaultLockoutPolicy(), fixedClock(&now))
 	key := "u@x.co"
 	for range 5 {
-		_, _ = svc.RecordFailure(key)
+		_, _ = svc.RecordFailure(ctx, key)
 	}
-	if err := svc.Guard(key); !errors.Is(err, domain.ErrAccountLocked) {
+	if err := svc.Guard(ctx, key); !errors.Is(err, domain.ErrAccountLocked) {
 		t.Fatalf("want ErrAccountLocked, got %v", err)
 	}
 }
 
 func TestLockoutService_LockExpires(t *testing.T) {
+	ctx := context.Background()
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
 	store := memory.NewLoginAttemptRepo()
 	svc := domain.NewLockoutService(store, domain.DefaultLockoutPolicy(), fixedClock(&now))
 	key := "u@x.co"
 	for range 5 {
-		_, _ = svc.RecordFailure(key)
+		_, _ = svc.RecordFailure(ctx, key)
 	}
-	if l, _ := svc.IsLocked(key); !l {
+	if l, _ := svc.IsLocked(ctx, key); !l {
 		t.Fatal("should be locked")
 	}
 	now = now.Add(16 * time.Minute) // window elapsed
-	if l, _ := svc.IsLocked(key); l {
+	if l, _ := svc.IsLocked(ctx, key); l {
 		t.Fatal("lock should have expired")
 	}
-	if err := svc.Guard(key); err != nil {
+	if err := svc.Guard(ctx, key); err != nil {
 		t.Fatalf("guard after expiry: %v", err)
 	}
 }
 
 func TestLockoutService_ClearOnSuccess(t *testing.T) {
+	ctx := context.Background()
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
 	store := memory.NewLoginAttemptRepo()
 	svc := domain.NewLockoutService(store, domain.DefaultLockoutPolicy(), fixedClock(&now))
 	key := "u@x.co"
 	for range 3 {
-		_, _ = svc.RecordFailure(key)
+		_, _ = svc.RecordFailure(ctx, key)
 	}
-	if err := svc.Clear(key); err != nil {
+	if err := svc.Clear(ctx, key); err != nil {
 		t.Fatal(err)
 	}
 	for i := 1; i <= 4; i++ {
-		locked, _ := svc.RecordFailure(key)
+		locked, _ := svc.RecordFailure(ctx, key)
 		if locked {
 			t.Fatalf("locked too early after clear at %d", i)
 		}
@@ -163,33 +168,35 @@ func TestLockoutService_ClearOnSuccess(t *testing.T) {
 }
 
 func TestLockoutService_RejectsEmptyKey(t *testing.T) {
+	ctx := context.Background()
 	svc := domain.NewLockoutService(memory.NewLoginAttemptRepo(), domain.DefaultLockoutPolicy(), nil)
-	if _, err := svc.RecordFailure(""); !errors.Is(err, domain.ErrInvalidLockoutKey) {
+	if _, err := svc.RecordFailure(ctx, ""); !errors.Is(err, domain.ErrInvalidLockoutKey) {
 		t.Fatalf("want ErrInvalidLockoutKey on empty key, got %v", err)
 	}
-	if _, err := svc.IsLocked("  "); !errors.Is(err, domain.ErrInvalidLockoutKey) {
+	if _, err := svc.IsLocked(ctx, "  "); !errors.Is(err, domain.ErrInvalidLockoutKey) {
 		t.Fatalf("want ErrInvalidLockoutKey on blank key, got %v", err)
 	}
-	if err := svc.Clear(""); !errors.Is(err, domain.ErrInvalidLockoutKey) {
+	if err := svc.Clear(ctx, ""); !errors.Is(err, domain.ErrInvalidLockoutKey) {
 		t.Fatalf("Clear must reject empty key, got %v", err)
 	}
 }
 
 func TestLockoutService_ActiveLockNotExtended(t *testing.T) {
+	ctx := context.Background()
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
 	store := memory.NewLoginAttemptRepo()
 	svc := domain.NewLockoutService(store, domain.DefaultLockoutPolicy(), fixedClock(&now))
 	key := "u@x.co"
 
 	for range 5 { // trip the lock at t0
-		_, _ = svc.RecordFailure(key)
+		_, _ = svc.RecordFailure(ctx, key)
 	}
 	lockedAt := now
 
 	// Hammer the key while it is locked. The window must NOT slide forward.
 	for i := range 10 {
 		now = lockedAt.Add(time.Duration(i+1) * time.Minute)
-		justLocked, err := svc.RecordFailure(key)
+		justLocked, err := svc.RecordFailure(ctx, key)
 		if err != nil {
 			t.Fatalf("attempt during lock: %v", err)
 		}
@@ -201,12 +208,13 @@ func TestLockoutService_ActiveLockNotExtended(t *testing.T) {
 	// Original window was 15m from lockedAt; after it elapses the lock clears
 	// despite the repeated attempts that would have extended a sliding window.
 	now = lockedAt.Add(15 * time.Minute)
-	if l, _ := svc.IsLocked(key); l {
+	if l, _ := svc.IsLocked(ctx, key); l {
 		t.Fatal("lock should expire exactly Window after it engaged, not slide forward")
 	}
 }
 
 func TestLockoutService_KeyIsOpaqueAndCaseSensitive(t *testing.T) {
+	ctx := context.Background()
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
 	store := memory.NewLoginAttemptRepo()
 	svc := domain.NewLockoutService(store, domain.DefaultLockoutPolicy(), fixedClock(&now))
@@ -215,12 +223,12 @@ func TestLockoutService_KeyIsOpaqueAndCaseSensitive(t *testing.T) {
 	// the service must not fold case on opaque keys (e.g. base64 / hashes).
 	upper, lower := "ABCdef", "abcdef"
 	for range 5 {
-		_, _ = svc.RecordFailure(upper)
+		_, _ = svc.RecordFailure(ctx, upper)
 	}
-	if l, _ := svc.IsLocked(upper); !l {
+	if l, _ := svc.IsLocked(ctx, upper); !l {
 		t.Fatal("upper-case key should be locked")
 	}
-	if l, _ := svc.IsLocked(lower); l {
+	if l, _ := svc.IsLocked(ctx, lower); l {
 		t.Fatal("lower-case key must be unaffected — keys are opaque, not case-folded")
 	}
 }
@@ -229,26 +237,27 @@ func TestLockoutService_KeyIsOpaqueAndCaseSensitive(t *testing.T) {
 // service surfaces persistence errors rather than swallowing them.
 type errStore struct{ err error }
 
-func (e errStore) Get(string) (domain.LoginAttemptSnapshot, error) {
+func (e errStore) Get(context.Context, string) (domain.LoginAttemptSnapshot, error) {
 	return domain.LoginAttemptSnapshot{}, e.err
 }
-func (e errStore) Save(domain.LoginAttemptSnapshot) error { return e.err }
-func (e errStore) Delete(string) error                    { return e.err }
+func (e errStore) Save(context.Context, domain.LoginAttemptSnapshot) error { return e.err }
+func (e errStore) Delete(context.Context, string) error                    { return e.err }
 
 func TestLockoutService_PropagatesStoreErrors(t *testing.T) {
+	ctx := context.Background()
 	boom := errors.New("store down")
 	svc := domain.NewLockoutService(errStore{err: boom}, domain.DefaultLockoutPolicy(), nil)
 
-	if _, err := svc.IsLocked("u@x.co"); !errors.Is(err, boom) {
+	if _, err := svc.IsLocked(ctx, "u@x.co"); !errors.Is(err, boom) {
 		t.Fatalf("IsLocked must surface store error, got %v", err)
 	}
-	if err := svc.Guard("u@x.co"); !errors.Is(err, boom) {
+	if err := svc.Guard(ctx, "u@x.co"); !errors.Is(err, boom) {
 		t.Fatalf("Guard must surface store error, got %v", err)
 	}
-	if _, err := svc.RecordFailure("u@x.co"); !errors.Is(err, boom) {
+	if _, err := svc.RecordFailure(ctx, "u@x.co"); !errors.Is(err, boom) {
 		t.Fatalf("RecordFailure must surface store Get error, got %v", err)
 	}
-	if err := svc.Clear("u@x.co"); !errors.Is(err, boom) {
+	if err := svc.Clear(ctx, "u@x.co"); !errors.Is(err, boom) {
 		t.Fatalf("Clear must surface store error, got %v", err)
 	}
 }
@@ -257,16 +266,17 @@ func TestLockoutService_PropagatesStoreErrors(t *testing.T) {
 // Save, covering the RecordFailure write-error path after a fresh count.
 type saveErrStore struct{ err error }
 
-func (s saveErrStore) Get(string) (domain.LoginAttemptSnapshot, error) {
+func (s saveErrStore) Get(context.Context, string) (domain.LoginAttemptSnapshot, error) {
 	return domain.LoginAttemptSnapshot{}, domain.ErrNotFound
 }
-func (s saveErrStore) Save(domain.LoginAttemptSnapshot) error { return s.err }
-func (s saveErrStore) Delete(string) error                    { return nil }
+func (s saveErrStore) Save(context.Context, domain.LoginAttemptSnapshot) error { return s.err }
+func (s saveErrStore) Delete(context.Context, string) error                    { return nil }
 
 func TestLockoutService_RecordFailureSaveError(t *testing.T) {
+	ctx := context.Background()
 	boom := errors.New("save failed")
 	svc := domain.NewLockoutService(saveErrStore{err: boom}, domain.DefaultLockoutPolicy(), nil)
-	if _, err := svc.RecordFailure("u@x.co"); !errors.Is(err, boom) {
+	if _, err := svc.RecordFailure(ctx, "u@x.co"); !errors.Is(err, boom) {
 		t.Fatalf("RecordFailure must surface Save error, got %v", err)
 	}
 }
