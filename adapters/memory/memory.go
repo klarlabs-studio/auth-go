@@ -169,6 +169,57 @@ func (r *MagicLinkRepo) MarkConsumed(ctx context.Context, hash string) error {
 	return nil
 }
 
+// TOTPRepo is an in-memory domain.TOTPRepository.
+type TOTPRepo struct {
+	mu sync.RWMutex
+	m  map[string]string // userID -> base32 secret
+}
+
+// NewTOTPRepo returns an empty TOTP secret repository.
+func NewTOTPRepo() *TOTPRepo {
+	return &TOTPRepo{m: make(map[string]string)}
+}
+
+// GetSecret returns the user's secret or domain.ErrNotFound.
+func (r *TOTPRepo) GetSecret(ctx context.Context, userID domain.UserID) (domain.TOTPSecret, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.TOTPSecret{}, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	enc, ok := r.m[userID.String()]
+	if !ok {
+		return domain.TOTPSecret{}, domain.ErrNotFound
+	}
+	return domain.TOTPSecretFromString(enc)
+}
+
+// SetSecret enrolls or replaces the user's secret.
+func (r *TOTPRepo) SetSecret(ctx context.Context, userID domain.UserID, secret domain.TOTPSecret) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.m[userID.String()] = secret.String()
+	return nil
+}
+
+// DeleteSecret removes the user's secret. Removing an absent secret returns
+// domain.ErrNotFound.
+func (r *TOTPRepo) DeleteSecret(ctx context.Context, userID domain.UserID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.m[userID.String()]; !ok {
+		return domain.ErrNotFound
+	}
+	delete(r.m, userID.String())
+	return nil
+}
+
 // PasskeyRepo is an in-memory domain.PasskeyRepository.
 type PasskeyRepo struct {
 	mu sync.RWMutex
@@ -383,6 +434,7 @@ var (
 	_ domain.UserRepository      = (*UserRepo)(nil)
 	_ domain.SessionRepository   = (*SessionRepo)(nil)
 	_ domain.MagicLinkRepository = (*MagicLinkRepo)(nil)
+	_ domain.TOTPRepository      = (*TOTPRepo)(nil)
 	_ domain.PasskeyRepository   = (*PasskeyRepo)(nil)
 	_ domain.LoginAttemptStore   = (*LoginAttemptRepo)(nil)
 	_ domain.WorkloadStore       = (*WorkloadKeyRepo)(nil)

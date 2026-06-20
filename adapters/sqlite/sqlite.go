@@ -170,6 +170,48 @@ func (r *MagicLinkRepo) MarkConsumed(ctx context.Context, hash string) error {
 	return requireOneRow(res)
 }
 
+// TOTPRepo is a SQLite domain.TOTPRepository. The base32 secret is stored
+// verbatim; protect the column the way you protect any shared secret.
+type TOTPRepo struct{ db DB }
+
+// NewTOTPRepo builds a TOTP secret repository over db.
+func NewTOTPRepo(db DB) *TOTPRepo { return &TOTPRepo{db: db} }
+
+// GetSecret loads a user's secret or returns domain.ErrNotFound.
+func (r *TOTPRepo) GetSecret(ctx context.Context, userID domain.UserID) (domain.TOTPSecret, error) {
+	var enc string
+	err := r.db.QueryRowContext(ctx,
+		`SELECT secret FROM authgo_totp_secrets WHERE user_id = ?`, userID.String(),
+	).Scan(&enc)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.TOTPSecret{}, domain.ErrNotFound
+	}
+	if err != nil {
+		return domain.TOTPSecret{}, err
+	}
+	return domain.TOTPSecretFromString(enc)
+}
+
+// SetSecret enrolls or replaces a user's secret.
+func (r *TOTPRepo) SetSecret(ctx context.Context, userID domain.UserID, secret domain.TOTPSecret) error {
+	_, err := r.db.ExecContext(ctx,
+		`INSERT INTO authgo_totp_secrets (user_id, secret) VALUES (?, ?)
+		 ON CONFLICT (user_id) DO UPDATE SET secret = excluded.secret`,
+		userID.String(), secret.String(),
+	)
+	return err
+}
+
+// DeleteSecret removes a user's secret. Removing an absent secret returns
+// domain.ErrNotFound.
+func (r *TOTPRepo) DeleteSecret(ctx context.Context, userID domain.UserID) error {
+	res, err := r.db.ExecContext(ctx, `DELETE FROM authgo_totp_secrets WHERE user_id = ?`, userID.String())
+	if err != nil {
+		return err
+	}
+	return requireOneRow(res)
+}
+
 // PasskeyRepo is a SQLite domain.PasskeyRepository.
 type PasskeyRepo struct{ db DB }
 
@@ -464,6 +506,7 @@ var (
 	_ domain.UserRepository      = (*UserRepo)(nil)
 	_ domain.SessionRepository   = (*SessionRepo)(nil)
 	_ domain.MagicLinkRepository = (*MagicLinkRepo)(nil)
+	_ domain.TOTPRepository      = (*TOTPRepo)(nil)
 	_ domain.PasskeyRepository   = (*PasskeyRepo)(nil)
 	_ domain.LoginAttemptStore   = (*LoginAttemptRepo)(nil)
 	_ domain.WorkloadStore       = (*WorkloadKeyRepo)(nil)

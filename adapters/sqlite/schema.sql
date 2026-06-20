@@ -40,6 +40,13 @@ CREATE TABLE IF NOT EXISTS authgo_magic_links (
     consumed    INTEGER NOT NULL DEFAULT 0
 );
 
+-- Enrolled TOTP secrets, one per user. The base32 secret is a credential;
+-- protect this column the way you protect any shared secret.
+CREATE TABLE IF NOT EXISTS authgo_totp_secrets (
+    user_id     TEXT PRIMARY KEY,
+    secret      TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS authgo_passkeys (
     id          BLOB PRIMARY KEY,
     user_id     TEXT NOT NULL,

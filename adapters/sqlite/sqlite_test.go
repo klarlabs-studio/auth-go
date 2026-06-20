@@ -231,6 +231,52 @@ func mustEmail(t *testing.T) domain.Email {
 	return e
 }
 
+func TestTOTPRepo(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	repo := sqlite.NewTOTPRepo(db)
+	u := uid(t, "u1")
+
+	if _, err := repo.GetSecret(ctx, u); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("missing secret: want ErrNotFound, got %v", err)
+	}
+	if err := repo.DeleteSecret(ctx, u); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("delete missing: want ErrNotFound, got %v", err)
+	}
+
+	secret, err := domain.NewTOTPSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SetSecret(ctx, u, secret); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	got, err := repo.GetSecret(ctx, u)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.String() != secret.String() {
+		t.Fatalf("round-trip mismatch: %q vs %q", got.String(), secret.String())
+	}
+
+	// SetSecret replaces in place.
+	other, _ := domain.NewTOTPSecret()
+	if err := repo.SetSecret(ctx, u, other); err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+	got, _ = repo.GetSecret(ctx, u)
+	if got.String() != other.String() {
+		t.Fatal("SetSecret did not replace")
+	}
+
+	if err := repo.DeleteSecret(ctx, u); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := repo.GetSecret(ctx, u); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("after delete: want ErrNotFound, got %v", err)
+	}
+}
+
 func TestPasskeyRepo(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
