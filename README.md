@@ -23,7 +23,8 @@ domain/              the auth bounded context — entities, value objects,
   session.go         Session aggregate + SessionRepository port
   magiclink.go       MagicLink aggregate + MagicLinkRepository port
   passkey.go         PasskeyCredential entity + Passkey{Repository,Authenticator}
-  services.go        SessionService · MagicLinkService (domain services)
+  workload.go        WorkerID · Scope · APIKey aggregate + WorkloadStore port
+  services.go        SessionService · MagicLinkService · WorkloadKeyService
 
 adapters/
   memory/            in-memory ports — tests + single-node dev
@@ -47,6 +48,7 @@ A product wires the repository ports to Postgres and gets every method.
 | TOTP | `domain.TOTPConfig` | RFC 6238, verified against the spec vector, clock-skew window, `otpauth://` URI |
 | Magic link | `domain.MagicLinkService` | single-use, TTL, only the SHA-256 hash stored |
 | Passkeys | `adapters/webauthn` | WebAuthn; kept an adapter so the core carries only `x/crypto` |
+| Workload keys | `domain.WorkloadKeyService` | scoped API keys for agent workers — 256-bit token (stdlib only), only the SHA-256 hash stored, `resource:action` scopes with `tools:*` wildcards, issue/validate/authorize/revoke/rotate |
 | Basic auth | `middleware.BasicAuthMiddleware` | bootstrap-then-session handshake; `Basic` once, session cookie after — fits browser SPAs |
 
 ## Example
@@ -74,6 +76,18 @@ err = cfg.Validate(secret, userCode, time.Now())
 ml := domain.NewMagicLinkService(pgstore.NewMagicLinkRepo(db), 15*time.Minute, nil)
 raw, _ := ml.Issue(emailVO, tid)    // email raw.String(); never stored
 link, err := ml.Consume(raw)        // single-use
+
+// Workload keys: scoped, time-boxed API keys for agent workers.
+wk := domain.NewWorkloadKeyService(pgstore.NewWorkloadKeyRepo(db), nil)
+worker, _ := domain.NewWorkerID("agent-7")
+scope, _ := domain.NewScope("tools:*", "memory:read")
+key, token, _ := wk.IssueKey(domain.KeyRequest{
+    WorkerID: worker, Scope: scope, ExpiresAt: time.Now().Add(24 * time.Hour),
+})                                   // hand token.String() to the worker once — never stored
+err = wk.Authorize(token, "tools:write")     // validate + scope match (wildcard)
+_, newToken, _ := wk.RotateKey(key.ID())     // atomic: new key live, old invalid
+wk.RevokeAllKeys(worker)                      // kill-switch
+_ = newToken
 
 // Basic-auth handshake: Authorization: Basic once, session cookie after.
 mw, _ := middleware.NewBasicAuthMiddleware(middleware.BasicAuthConfig{
