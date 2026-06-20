@@ -29,6 +29,11 @@ scan:
     - "release-artifacts/"
     # Parameterized SQL schema (DDL), not application code.
     - "adapters/pgstore/schema.sql"
+    # Runnable example programs: living documentation that, like the README
+    # snippets above, contains illustrative placeholder data (e.g. a
+    # user@example.com email, demo worker IDs). These are documentation values,
+    # not real PII or secrets. Mirrors the README/docs exclusions.
+    - "example/**"
     # Test files: long CamelCase test-function identifiers (e.g.
     # TestWorkloadKeyService_RejectsExpiredOnIssueIsImmediate) match the
     # SEC-659 "Split API Key" regex. These are identifiers, not secrets —

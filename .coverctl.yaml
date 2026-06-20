@@ -33,3 +33,9 @@ policy:
       match:
         - ./adapters/pgstore/...
       min: 0
+    # Runnable example programs — living documentation exercised via `go run`,
+    # not unit-tested. They compile in CI (go build ./...); no coverage bar.
+    - name: example
+      match:
+        - ./example/...
+      min: 0
