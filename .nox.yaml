@@ -1,5 +1,8 @@
 scan:
   exclude:
+    # This config itself: the exclusion comments below name secret rules
+    # ("...API Key") by design, which trip those very regexes. Not code.
+    - ".nox.yaml"
     # Baseline file: contains high-entropy fingerprint hashes (SHA-256 hex)
     # that match the SEC-680 "Prometheus API key" regex; these ARE the
     # finding fingerprints, not actual secrets.
@@ -26,6 +29,13 @@ scan:
     - "release-artifacts/"
     # Parameterized SQL schema (DDL), not application code.
     - "adapters/pgstore/schema.sql"
+    # Test files: long CamelCase test-function identifiers (e.g.
+    # TestWorkloadKeyService_RejectsExpiredOnIssueIsImmediate) match the
+    # SEC-659 "Split API Key" regex. These are identifiers, not secrets —
+    # no real key is suppressed. Mirrors the gosec *_test.go exclusion and
+    # the convention in the other Klarlabs repos' .nox.yaml.
+    - "*_test.go"
+    - "**/*_test.go"
 
 # Activate nox code-level taint SAST (source-to-sink: SSRF, injection,
 # path traversal). nox scan auto-installs (cosign-verified) + runs it.
