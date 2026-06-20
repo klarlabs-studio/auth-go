@@ -88,7 +88,7 @@ key, token, _ := wk.IssueKey(ctx, domain.KeyRequest{
     WorkerID: worker, Scope: scope, ExpiresAt: time.Now().Add(24 * time.Hour),
 })                                   // hand token.String() to the worker once — never stored
 err = wk.Authorize(ctx, token, "tools:write")     // validate + scope match (wildcard)
-_, newToken, _ := wk.RotateKey(ctx, key.ID())     // atomic: new key live, old invalid
+_, newToken, _ := wk.RotateKey(ctx, key.ID())     // new key live before old deleted — brief overlap, never a gap (not atomic across stores)
 wk.RevokeAllKeys(ctx, worker)                     // kill-switch
 _ = newToken
 

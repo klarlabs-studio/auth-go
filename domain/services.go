@@ -300,10 +300,15 @@ func (s *WorkloadKeyService) ListKeys(ctx context.Context, workerID WorkerID) ([
 }
 
 // RotateKey issues a replacement key — same worker, scope, and expiry — and
-// invalidates the old one, returning the new APIKey and its RAW token. The new
-// key is created before the old is deleted so a failure never leaves the worker
-// with no usable key; if deletion of the old key fails the rotation is rolled
-// back by deleting the freshly-created key.
+// invalidates the old one, returning the new APIKey and its RAW token.
+//
+// This is NOT transactional across stores. It creates the new key first, then
+// deletes the old one, so the two keys briefly OVERLAP (both valid) — there is
+// never a gap with no usable key. If deleting the old key fails, the new key is
+// rolled back on a best-effort basis (its delete is attempted and its error
+// ignored) and the original delete error is surfaced. Over a non-transactional
+// store these steps are not atomic; a crash between create and delete can leave
+// both keys live until the old one expires or is revoked.
 func (s *WorkloadKeyService) RotateKey(ctx context.Context, id KeyID) (APIKey, WorkloadToken, error) {
 	old, err := s.store.GetKey(ctx, id)
 	if err != nil {

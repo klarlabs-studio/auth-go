@@ -214,6 +214,11 @@ func NewWorkloadKeyRepo() *WorkloadKeyRepo {
 
 // CreateKey inserts a new key, rejecting a duplicate ID or hash.
 func (r *WorkloadKeyRepo) CreateKey(ctx context.Context, k domain.APIKey) error {
+	// Best-effort entry guard: the in-memory store does no blocking I/O, so
+	// there is no mid-operation cancellation point. Checking ctx.Err() up front
+	// only honors an already-cancelled context for parity with the WorkloadStore
+	// contract — it is not a cancellation guarantee mid-flight. The same applies
+	// to every ctx.Err() guard in this repo.
 	if err := ctx.Err(); err != nil {
 		return err
 	}
