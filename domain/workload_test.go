@@ -657,6 +657,67 @@ func TestWorkloadKeyService_StoreErrorsSurface(t *testing.T) {
 	}
 }
 
+// atomicSpyStore wraps a WorkloadStore and also implements
+// domain.AtomicRotator, recording whether the atomic path was taken so the test
+// can prove WorkloadKeyService.RotateKey prefers it over create-then-delete.
+type atomicSpyStore struct {
+	domain.WorkloadStore
+	rotated   bool
+	createHit bool
+}
+
+func (s *atomicSpyStore) CreateKey(ctx context.Context, k domain.APIKey) error {
+	s.createHit = true
+	return s.WorkloadStore.CreateKey(ctx, k)
+}
+
+func (s *atomicSpyStore) RotateAtomically(ctx context.Context, oldID domain.KeyID, newKey domain.APIKey) error {
+	s.rotated = true
+	if err := s.DeleteKey(ctx, oldID); err != nil {
+		return err
+	}
+	return s.WorkloadStore.CreateKey(ctx, newKey)
+}
+
+func TestWorkloadKeyService_RotatePrefersAtomicPath(t *testing.T) {
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	ctx := context.Background()
+	spy := &atomicSpyStore{WorkloadStore: memory.NewWorkloadKeyRepo()}
+	svc := domain.NewWorkloadKeyService(spy, fixedClock(&now))
+
+	old, _, err := svc.IssueKey(ctx, domain.KeyRequest{
+		WorkerID: mustWorkerID(t, "a"), Scope: mustScope(t, "tools:*"), ExpiresAt: now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spy.createHit = false // reset: the issue above legitimately created a key
+
+	newKey, newRaw, err := svc.RotateKey(ctx, old.ID())
+	if err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	if !spy.rotated {
+		t.Fatal("RotateKey did not use the atomic path for an AtomicRotator store")
+	}
+	if spy.createHit {
+		t.Fatal("RotateKey used create-then-delete despite an AtomicRotator store")
+	}
+	// The atomic swap landed: new key valid, old token gone, exactly one key.
+	if _, err := svc.ValidateKey(ctx, newRaw); err != nil {
+		t.Fatalf("new token invalid: %v", err)
+	}
+	left, _ := svc.ListKeys(ctx, mustWorkerID(t, "a"))
+	if len(left) != 1 || left[0].ID() != newKey.ID() {
+		t.Fatalf("atomic rotate left wrong keys: %+v", left)
+	}
+
+	// An unknown old key still maps to ErrKeyNotFound through the atomic path.
+	if _, _, err := svc.RotateKey(ctx, domain.KeyID("nope")); !errors.Is(err, domain.ErrKeyNotFound) {
+		t.Fatalf("rotate unknown via atomic: want ErrKeyNotFound, got %v", err)
+	}
+}
+
 func TestWorkloadKeyService_RejectsExpiredOnIssueIsImmediate(t *testing.T) {
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
 	svc := domain.NewWorkloadKeyService(memory.NewWorkloadKeyRepo(), fixedClock(&now))

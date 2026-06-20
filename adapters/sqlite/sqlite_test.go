@@ -65,6 +65,53 @@ func scope(t *testing.T, actions ...string) domain.Scope {
 	return sc
 }
 
+func TestUserRepo(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	repo := sqlite.NewUserRepo(db)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	if _, err := repo.GetUser(ctx, uid(t, "u1")); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("missing user: want ErrNotFound, got %v", err)
+	}
+
+	u, err := domain.NewUser(uid(t, "u1"), tid(t), mustEmail(t), now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.UpsertUser(ctx, u); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	got, err := repo.GetUser(ctx, uid(t, "u1"))
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Email().String() != "a@b.co" || got.TenantID().String() != "t1" {
+		t.Fatalf("roundtrip mismatch: %+v", got.Snapshot())
+	}
+	if !got.CreatedAt().Equal(now) || !got.UpdatedAt().Equal(now) {
+		t.Fatalf("timestamps not round-tripped: %+v", got.Snapshot())
+	}
+
+	// Upsert updates in place.
+	later := now.Add(time.Hour)
+	other, err := domain.NewEmail("c@d.co")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u2, err := domain.NewUser(uid(t, "u1"), tid(t), other, now, later)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.UpsertUser(ctx, u2); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	got, _ = repo.GetUser(ctx, uid(t, "u1"))
+	if got.Email().String() != "c@d.co" || !got.UpdatedAt().Equal(later) {
+		t.Fatalf("upsert did not update: %+v", got.Snapshot())
+	}
+}
+
 func TestSessionRepo(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
@@ -182,6 +229,52 @@ func mustEmail(t *testing.T) domain.Email {
 		t.Fatal(err)
 	}
 	return e
+}
+
+func TestTOTPRepo(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	repo := sqlite.NewTOTPRepo(db)
+	u := uid(t, "u1")
+
+	if _, err := repo.GetSecret(ctx, u); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("missing secret: want ErrNotFound, got %v", err)
+	}
+	if err := repo.DeleteSecret(ctx, u); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("delete missing: want ErrNotFound, got %v", err)
+	}
+
+	secret, err := domain.NewTOTPSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SetSecret(ctx, u, secret); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	got, err := repo.GetSecret(ctx, u)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.String() != secret.String() {
+		t.Fatalf("round-trip mismatch: %q vs %q", got.String(), secret.String())
+	}
+
+	// SetSecret replaces in place.
+	other, _ := domain.NewTOTPSecret()
+	if err := repo.SetSecret(ctx, u, other); err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+	got, _ = repo.GetSecret(ctx, u)
+	if got.String() != other.String() {
+		t.Fatal("SetSecret did not replace")
+	}
+
+	if err := repo.DeleteSecret(ctx, u); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := repo.GetSecret(ctx, u); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("after delete: want ErrNotFound, got %v", err)
+	}
 }
 
 func TestPasskeyRepo(t *testing.T) {
@@ -383,6 +476,115 @@ func TestWorkloadKeyRepo(t *testing.T) {
 	}
 	if _, err := repo.GetKeyByHash(ctx, "deadbeef"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("get unknown hash: want ErrNotFound, got %v", err)
+	}
+}
+
+// TestWorkloadKeyRepo_RotateAtomically proves the single-transaction swap: after
+// a successful rotate exactly one key (the new one) exists, an unknown old ID
+// yields ErrNotFound and changes nothing, and a hash collision yields
+// ErrConflict and rolls the whole swap back (the old key survives).
+func TestWorkloadKeyRepo_RotateAtomically(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	repo := sqlite.NewWorkloadKeyRepo(db)
+	now := time.Now().UTC().Truncate(time.Second)
+	svc := domain.NewWorkloadKeyService(repo, func() time.Time { return now })
+	w := wid(t, "agent-rot")
+
+	old, _, err := svc.IssueKey(ctx, domain.KeyRequest{
+		WorkerID: w, Scope: scope(t, "tools:read"), ExpiresAt: now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+
+	// Unknown old ID → ErrNotFound, nothing changes (old still present).
+	newSnap := domain.APIKeySnapshot{
+		ID: "wk_new", Hash: "newhash", WorkerID: "agent-rot",
+		Scope: []string{"tools:read"}, ExpiresAt: now.Add(time.Hour), CreatedAt: now,
+	}
+	if err := repo.RotateAtomically(ctx, domain.KeyID("wk_absent"), domain.APIKeyFromSnapshot(newSnap)); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("rotate unknown: want ErrNotFound, got %v", err)
+	}
+	if _, err := repo.GetKey(ctx, old.ID()); err != nil {
+		t.Fatalf("old key lost after failed rotate: %v", err)
+	}
+
+	// Successful atomic swap: old gone, new present, exactly one key.
+	if err := repo.RotateAtomically(ctx, old.ID(), domain.APIKeyFromSnapshot(newSnap)); err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	if _, err := repo.GetKey(ctx, old.ID()); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("old key survived atomic rotate: %v", err)
+	}
+	if _, err := repo.GetKey(ctx, domain.KeyID("wk_new")); err != nil {
+		t.Fatalf("new key absent after rotate: %v", err)
+	}
+	list, _ := repo.ListKeysByWorker(ctx, w)
+	if len(list) != 1 {
+		t.Fatalf("atomic rotate left %d keys, want 1", len(list))
+	}
+
+	// Hash collision rolls the whole swap back: insert a second key, then try to
+	// rotate it into a key whose hash duplicates the surviving one.
+	second, _, err := svc.IssueKey(ctx, domain.KeyRequest{
+		WorkerID: w, Scope: scope(t, "tools:read"), ExpiresAt: now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("issue second: %v", err)
+	}
+	collide := domain.APIKeySnapshot{
+		ID: "wk_collide", Hash: "newhash", WorkerID: "agent-rot", // duplicate hash of wk_new
+		Scope: []string{"tools:read"}, ExpiresAt: now.Add(time.Hour), CreatedAt: now,
+	}
+	if err := repo.RotateAtomically(ctx, second.ID(), domain.APIKeyFromSnapshot(collide)); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("rotate collision: want ErrConflict, got %v", err)
+	}
+	// The swap rolled back: the second key still exists (delete was undone).
+	if _, err := repo.GetKey(ctx, second.ID()); err != nil {
+		t.Fatalf("second key lost after rolled-back rotate: %v", err)
+	}
+}
+
+// TestWorkloadKeyRepo_RotateAtomicallyInTx proves the *sql.Tx-composed path:
+// when the repo is built over a caller's transaction the swap runs directly
+// (no nested transaction) and is atomic within that outer transaction.
+func TestWorkloadKeyRepo_RotateAtomicallyInTx(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	svc := domain.NewWorkloadKeyService(sqlite.NewWorkloadKeyRepo(db), func() time.Time { return now })
+	w := wid(t, "agent-tx")
+	old, _, err := svc.IssueKey(ctx, domain.KeyRequest{
+		WorkerID: w, Scope: scope(t, "tools:read"), ExpiresAt: now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	txRepo := sqlite.NewWorkloadKeyRepo(tx)
+	newSnap := domain.APIKeySnapshot{
+		ID: "wk_txnew", Hash: "txhash", WorkerID: "agent-tx",
+		Scope: []string{"tools:read"}, ExpiresAt: now.Add(time.Hour), CreatedAt: now,
+	}
+	if err := txRepo.RotateAtomically(ctx, old.ID(), domain.APIKeyFromSnapshot(newSnap)); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("rotate in tx: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	repo := sqlite.NewWorkloadKeyRepo(db)
+	if _, err := repo.GetKey(ctx, old.ID()); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("old key survived tx rotate: %v", err)
+	}
+	if _, err := repo.GetKey(ctx, domain.KeyID("wk_txnew")); err != nil {
+		t.Fatalf("new key absent after tx rotate: %v", err)
 	}
 }
 

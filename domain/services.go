@@ -75,6 +75,36 @@ func (s *SessionService) Validate(ctx context.Context, token Token) (Session, er
 	return sess, nil
 }
 
+// Rotate re-issues a session: it validates oldToken, issues a fresh session for
+// the same user and tenant with a new token and a full lifetime measured from
+// now, persists it, and then deletes the old token — mitigating session
+// fixation by ensuring the post-authentication token is never one an attacker
+// could have planted earlier.
+//
+// It returns the new Session. An unknown old token yields ErrNotFound and an
+// expired one ErrExpired (the expired session is purged, as in Validate); in
+// both cases nothing new is issued. The new session is created before the old
+// one is deleted, so a crash between the two steps leaves the old token briefly
+// live rather than leaving the caller with no session at all; the old token is
+// always invalidated on the success path.
+func (s *SessionService) Rotate(ctx context.Context, oldToken Token) (Session, error) {
+	old, err := s.Validate(ctx, oldToken)
+	if err != nil {
+		return Session{}, err
+	}
+	fresh, err := s.Issue(ctx, old.userID, old.tenantID)
+	if err != nil {
+		return Session{}, err
+	}
+	if err := s.repo.Delete(ctx, oldToken); err != nil {
+		// Roll back the just-issued session so a failed rotation does not leave
+		// two live tokens; best-effort cleanup, original delete error surfaced.
+		_ = s.repo.Delete(ctx, fresh.token)
+		return Session{}, err
+	}
+	return fresh, nil
+}
+
 // Revoke deletes one session (logout).
 func (s *SessionService) Revoke(ctx context.Context, token Token) error {
 	return s.repo.Delete(ctx, token)
@@ -314,13 +344,18 @@ func (s *WorkloadKeyService) ListKeys(ctx context.Context, workerID WorkerID) ([
 // RotateKey issues a replacement key — same worker, scope, and expiry — and
 // invalidates the old one, returning the new APIKey and its RAW token.
 //
-// This is NOT transactional across stores. It creates the new key first, then
-// deletes the old one, so the two keys briefly OVERLAP (both valid) — there is
-// never a gap with no usable key. If deleting the old key fails, the new key is
-// rolled back on a best-effort basis (its delete is attempted and its error
-// ignored) and the original delete error is surfaced. Over a non-transactional
-// store these steps are not atomic; a crash between create and delete can leave
-// both keys live until the old one expires or is revoked.
+// If the store implements AtomicRotator (the sqlite and pgstore adapters do),
+// the swap runs in a single transaction: the old key is deleted and the new key
+// inserted atomically, so there is never a window where both keys are live and
+// no crash can leave the old key dangling.
+//
+// Otherwise it falls back to a create-then-delete path: it creates the new key
+// first, then deletes the old one, so the two keys briefly OVERLAP (both valid)
+// — there is never a gap with no usable key. If deleting the old key fails, the
+// new key is rolled back on a best-effort basis and the original delete error
+// is surfaced. Over a non-transactional store these steps are not atomic; a
+// crash between create and delete can leave both keys live until the old one
+// expires or is revoked.
 func (s *WorkloadKeyService) RotateKey(ctx context.Context, id KeyID) (APIKey, WorkloadToken, error) {
 	old, err := s.store.GetKey(ctx, id)
 	if err != nil {
@@ -337,6 +372,19 @@ func (s *WorkloadKeyService) RotateKey(ctx context.Context, id KeyID) (APIKey, W
 	if err != nil {
 		return APIKey{}, WorkloadToken{}, err
 	}
+
+	// Atomic path: a single-transaction swap when the store supports it.
+	if ar, ok := s.store.(AtomicRotator); ok {
+		if err := ar.RotateAtomically(ctx, old.id, newKey); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return APIKey{}, WorkloadToken{}, ErrKeyNotFound
+			}
+			return APIKey{}, WorkloadToken{}, err
+		}
+		return newKey, raw, nil
+	}
+
+	// Non-transactional fallback: create-then-delete with overlap.
 	if err := s.store.CreateKey(ctx, newKey); err != nil {
 		return APIKey{}, WorkloadToken{}, err
 	}

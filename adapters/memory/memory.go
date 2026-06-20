@@ -16,6 +16,43 @@ import (
 	"github.com/klarlabs-studio/auth-go/domain"
 )
 
+// UserRepo is an in-memory domain.UserRepository.
+type UserRepo struct {
+	mu sync.RWMutex
+	m  map[string]domain.UserSnapshot
+}
+
+// NewUserRepo returns an empty user repository.
+func NewUserRepo() *UserRepo {
+	return &UserRepo{m: make(map[string]domain.UserSnapshot)}
+}
+
+// GetUser returns the user for an ID or domain.ErrNotFound.
+func (r *UserRepo) GetUser(ctx context.Context, id domain.UserID) (domain.User, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.User{}, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	snap, ok := r.m[id.String()]
+	if !ok {
+		return domain.User{}, domain.ErrNotFound
+	}
+	return domain.UserFromSnapshot(snap), nil
+}
+
+// UpsertUser inserts or updates a user, keyed on its ID.
+func (r *UserRepo) UpsertUser(ctx context.Context, u domain.User) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	snap := u.Snapshot()
+	r.m[snap.ID] = snap
+	return nil
+}
+
 // SessionRepo is an in-memory domain.SessionRepository.
 type SessionRepo struct {
 	mu sync.RWMutex
@@ -129,6 +166,57 @@ func (r *MagicLinkRepo) MarkConsumed(ctx context.Context, hash string) error {
 	}
 	snap.Consumed = true
 	r.m[hash] = snap
+	return nil
+}
+
+// TOTPRepo is an in-memory domain.TOTPRepository.
+type TOTPRepo struct {
+	mu sync.RWMutex
+	m  map[string]string // userID -> base32 secret
+}
+
+// NewTOTPRepo returns an empty TOTP secret repository.
+func NewTOTPRepo() *TOTPRepo {
+	return &TOTPRepo{m: make(map[string]string)}
+}
+
+// GetSecret returns the user's secret or domain.ErrNotFound.
+func (r *TOTPRepo) GetSecret(ctx context.Context, userID domain.UserID) (domain.TOTPSecret, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.TOTPSecret{}, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	enc, ok := r.m[userID.String()]
+	if !ok {
+		return domain.TOTPSecret{}, domain.ErrNotFound
+	}
+	return domain.TOTPSecretFromString(enc)
+}
+
+// SetSecret enrolls or replaces the user's secret.
+func (r *TOTPRepo) SetSecret(ctx context.Context, userID domain.UserID, secret domain.TOTPSecret) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.m[userID.String()] = secret.String()
+	return nil
+}
+
+// DeleteSecret removes the user's secret. Removing an absent secret returns
+// domain.ErrNotFound.
+func (r *TOTPRepo) DeleteSecret(ctx context.Context, userID domain.UserID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.m[userID.String()]; !ok {
+		return domain.ErrNotFound
+	}
+	delete(r.m, userID.String())
 	return nil
 }
 
@@ -343,8 +431,10 @@ func (r *WorkloadKeyRepo) DeleteKey(ctx context.Context, id domain.KeyID) error 
 
 // Port assertions.
 var (
+	_ domain.UserRepository      = (*UserRepo)(nil)
 	_ domain.SessionRepository   = (*SessionRepo)(nil)
 	_ domain.MagicLinkRepository = (*MagicLinkRepo)(nil)
+	_ domain.TOTPRepository      = (*TOTPRepo)(nil)
 	_ domain.PasskeyRepository   = (*PasskeyRepo)(nil)
 	_ domain.LoginAttemptStore   = (*LoginAttemptRepo)(nil)
 	_ domain.WorkloadStore       = (*WorkloadKeyRepo)(nil)

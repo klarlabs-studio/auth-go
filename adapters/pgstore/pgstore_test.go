@@ -36,7 +36,7 @@ func openTestDB(t *testing.T) *sql.DB {
 	if _, err := db.Exec(string(schema)); err != nil {
 		t.Fatalf("apply schema: %v", err)
 	}
-	for _, tbl := range []string{"authgo_sessions", "authgo_magic_links", "authgo_passkeys", "authgo_login_attempts", "authgo_workload_keys"} {
+	for _, tbl := range []string{"authgo_users", "authgo_sessions", "authgo_magic_links", "authgo_totp_secrets", "authgo_passkeys", "authgo_login_attempts", "authgo_workload_keys"} {
 		if _, err := db.Exec("TRUNCATE " + tbl); err != nil {
 			t.Fatalf("truncate %s: %v", tbl, err)
 		}
@@ -61,6 +61,45 @@ func tid(t *testing.T, s string) domain.TenantID {
 		t.Fatal(err)
 	}
 	return id
+}
+
+func TestUserRepo_Integration(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	repo := pgstore.NewUserRepo(db)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	if _, err := repo.GetUser(ctx, uid(t, "user-pg")); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("missing user: want ErrNotFound, got %v", err)
+	}
+
+	email, _ := domain.NewEmail("felix@klarlabs.de")
+	u, err := domain.NewUser(uid(t, "user-pg"), tid(t, "tenant-pg"), email, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.UpsertUser(ctx, u); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	got, err := repo.GetUser(ctx, uid(t, "user-pg"))
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Email().String() != "felix@klarlabs.de" || got.TenantID().String() != "tenant-pg" {
+		t.Fatalf("roundtrip mismatch: %+v", got.Snapshot())
+	}
+
+	// Upsert updates in place.
+	later := now.Add(time.Hour)
+	other, _ := domain.NewEmail("new@klarlabs.de")
+	u2, _ := domain.NewUser(uid(t, "user-pg"), tid(t, "tenant-pg"), other, now, later)
+	if err := repo.UpsertUser(ctx, u2); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	got, _ = repo.GetUser(ctx, uid(t, "user-pg"))
+	if got.Email().String() != "new@klarlabs.de" || !got.UpdatedAt().Equal(later) {
+		t.Fatalf("upsert did not update: %+v", got.Snapshot())
+	}
 }
 
 func TestSessionRepo_Integration(t *testing.T) {
@@ -116,6 +155,51 @@ func TestMagicLinkRepo_Integration(t *testing.T) {
 	}
 	if _, err := svc.Consume(ctx, raw); !errors.Is(err, domain.ErrConsumed) {
 		t.Fatalf("reuse: want ErrConsumed, got %v", err)
+	}
+}
+
+func TestTOTPRepo_Integration(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	repo := pgstore.NewTOTPRepo(db)
+	u := uid(t, "u1")
+
+	if _, err := repo.GetSecret(ctx, u); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("missing secret: want ErrNotFound, got %v", err)
+	}
+	if err := repo.DeleteSecret(ctx, u); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("delete missing: want ErrNotFound, got %v", err)
+	}
+
+	secret, err := domain.NewTOTPSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SetSecret(ctx, u, secret); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	got, err := repo.GetSecret(ctx, u)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.String() != secret.String() {
+		t.Fatalf("round-trip mismatch: %q vs %q", got.String(), secret.String())
+	}
+
+	other, _ := domain.NewTOTPSecret()
+	if err := repo.SetSecret(ctx, u, other); err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+	got, _ = repo.GetSecret(ctx, u)
+	if got.String() != other.String() {
+		t.Fatal("SetSecret did not replace")
+	}
+
+	if err := repo.DeleteSecret(ctx, u); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := repo.GetSecret(ctx, u); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("after delete: want ErrNotFound, got %v", err)
 	}
 }
 
@@ -247,5 +331,64 @@ func TestWorkloadKeyRepo_Integration(t *testing.T) {
 	// Delete unknown → ErrNotFound.
 	if err := repo.DeleteKey(ctx, domain.KeyID("nope")); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("delete unknown: want ErrNotFound, got %v", err)
+	}
+}
+
+// TestWorkloadKeyRepo_RotateAtomically_Integration proves the single-transaction
+// swap over real Postgres: a successful rotate leaves exactly one key, an
+// unknown old ID yields ErrNotFound and changes nothing, and a hash collision
+// yields ErrConflict and rolls the swap back so the old key survives.
+func TestWorkloadKeyRepo_RotateAtomically_Integration(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	repo := pgstore.NewWorkloadKeyRepo(db)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	svc := domain.NewWorkloadKeyService(repo, func() time.Time { return now })
+	w, _ := domain.NewWorkerID("agent-rot")
+	sc, _ := domain.NewScope("tools:read")
+
+	old, _, err := svc.IssueKey(ctx, domain.KeyRequest{WorkerID: w, Scope: sc, ExpiresAt: now.Add(time.Hour)})
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+
+	newSnap := domain.APIKeySnapshot{
+		ID: "wk_new", Hash: "newhash", WorkerID: "agent-rot",
+		Scope: []string{"tools:read"}, ExpiresAt: now.Add(time.Hour), CreatedAt: now,
+	}
+	// Unknown old → ErrNotFound, nothing changes.
+	if err := repo.RotateAtomically(ctx, domain.KeyID("wk_absent"), domain.APIKeyFromSnapshot(newSnap)); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("rotate unknown: want ErrNotFound, got %v", err)
+	}
+	if _, err := repo.GetKey(ctx, old.ID()); err != nil {
+		t.Fatalf("old key lost after failed rotate: %v", err)
+	}
+
+	// Successful atomic swap.
+	if err := repo.RotateAtomically(ctx, old.ID(), domain.APIKeyFromSnapshot(newSnap)); err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	if _, err := repo.GetKey(ctx, old.ID()); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("old key survived atomic rotate: %v", err)
+	}
+	list, _ := repo.ListKeysByWorker(ctx, w)
+	if len(list) != 1 {
+		t.Fatalf("atomic rotate left %d keys, want 1", len(list))
+	}
+
+	// Hash collision rolls back: the second key survives.
+	second, _, err := svc.IssueKey(ctx, domain.KeyRequest{WorkerID: w, Scope: sc, ExpiresAt: now.Add(time.Hour)})
+	if err != nil {
+		t.Fatalf("issue second: %v", err)
+	}
+	collide := domain.APIKeySnapshot{
+		ID: "wk_collide", Hash: "newhash", WorkerID: "agent-rot",
+		Scope: []string{"tools:read"}, ExpiresAt: now.Add(time.Hour), CreatedAt: now,
+	}
+	if err := repo.RotateAtomically(ctx, second.ID(), domain.APIKeyFromSnapshot(collide)); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("rotate collision: want ErrConflict, got %v", err)
+	}
+	if _, err := repo.GetKey(ctx, second.ID()); err != nil {
+		t.Fatalf("second key lost after rolled-back rotate: %v", err)
 	}
 }

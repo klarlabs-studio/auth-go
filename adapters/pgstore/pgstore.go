@@ -26,6 +26,42 @@ type DB interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
+// UserRepo is a Postgres domain.UserRepository.
+type UserRepo struct{ db DB }
+
+// NewUserRepo builds a user repository over db.
+func NewUserRepo(db DB) *UserRepo { return &UserRepo{db: db} }
+
+// GetUser loads a user or returns domain.ErrNotFound.
+func (r *UserRepo) GetUser(ctx context.Context, id domain.UserID) (domain.User, error) {
+	var snap domain.UserSnapshot
+	err := r.db.QueryRowContext(ctx,
+		`SELECT id, tenant_id, email, created_at, updated_at
+		 FROM authgo_users WHERE id = $1`, id.String(),
+	).Scan(&snap.ID, &snap.TenantID, &snap.Email, &snap.CreatedAt, &snap.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.User{}, domain.ErrNotFound
+	}
+	if err != nil {
+		return domain.User{}, err
+	}
+	return domain.UserFromSnapshot(snap), nil
+}
+
+// UpsertUser inserts or updates a user, keyed on its ID.
+func (r *UserRepo) UpsertUser(ctx context.Context, u domain.User) error {
+	snap := u.Snapshot()
+	_, err := r.db.ExecContext(ctx,
+		`INSERT INTO authgo_users (id, tenant_id, email, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5)
+		 ON CONFLICT (id) DO UPDATE SET
+		   tenant_id = EXCLUDED.tenant_id, email = EXCLUDED.email,
+		   created_at = EXCLUDED.created_at, updated_at = EXCLUDED.updated_at`,
+		snap.ID, snap.TenantID, snap.Email, snap.CreatedAt, snap.UpdatedAt,
+	)
+	return err
+}
+
 // SessionRepo is a Postgres domain.SessionRepository.
 type SessionRepo struct{ db DB }
 
@@ -110,6 +146,48 @@ func (r *MagicLinkRepo) FindByHash(ctx context.Context, hash string) (domain.Mag
 // MarkConsumed flags a link as used.
 func (r *MagicLinkRepo) MarkConsumed(ctx context.Context, hash string) error {
 	res, err := r.db.ExecContext(ctx, `UPDATE authgo_magic_links SET consumed = TRUE WHERE hash = $1`, hash)
+	if err != nil {
+		return err
+	}
+	return requireOneRow(res)
+}
+
+// TOTPRepo is a Postgres domain.TOTPRepository. The base32 secret is stored
+// verbatim; protect the column the way you protect any shared secret.
+type TOTPRepo struct{ db DB }
+
+// NewTOTPRepo builds a TOTP secret repository over db.
+func NewTOTPRepo(db DB) *TOTPRepo { return &TOTPRepo{db: db} }
+
+// GetSecret loads a user's secret or returns domain.ErrNotFound.
+func (r *TOTPRepo) GetSecret(ctx context.Context, userID domain.UserID) (domain.TOTPSecret, error) {
+	var enc string
+	err := r.db.QueryRowContext(ctx,
+		`SELECT secret FROM authgo_totp_secrets WHERE user_id = $1`, userID.String(),
+	).Scan(&enc)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.TOTPSecret{}, domain.ErrNotFound
+	}
+	if err != nil {
+		return domain.TOTPSecret{}, err
+	}
+	return domain.TOTPSecretFromString(enc)
+}
+
+// SetSecret enrolls or replaces a user's secret.
+func (r *TOTPRepo) SetSecret(ctx context.Context, userID domain.UserID, secret domain.TOTPSecret) error {
+	_, err := r.db.ExecContext(ctx,
+		`INSERT INTO authgo_totp_secrets (user_id, secret) VALUES ($1, $2)
+		 ON CONFLICT (user_id) DO UPDATE SET secret = EXCLUDED.secret`,
+		userID.String(), secret.String(),
+	)
+	return err
+}
+
+// DeleteSecret removes a user's secret. Removing an absent secret returns
+// domain.ErrNotFound.
+func (r *TOTPRepo) DeleteSecret(ctx context.Context, userID domain.UserID) error {
+	res, err := r.db.ExecContext(ctx, `DELETE FROM authgo_totp_secrets WHERE user_id = $1`, userID.String())
 	if err != nil {
 		return err
 	}
@@ -332,6 +410,61 @@ func (r *WorkloadKeyRepo) DeleteKey(ctx context.Context, id domain.KeyID) error 
 	return requireOneRow(res)
 }
 
+// txBeginner is the subset of *sql.DB that can start a transaction. A repo built
+// over a *sql.DB satisfies it; a repo built over a *sql.Tx (composed into a
+// caller's transaction) does not — in which case the swap below already runs
+// inside that outer transaction and is atomic without a nested one.
+type txBeginner interface {
+	BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
+}
+
+// RotateAtomically deletes oldID and inserts newKey in a single transaction,
+// implementing domain.AtomicRotator. When the repo is backed by a *sql.DB it
+// opens a transaction so the delete+insert apply atomically (no window where
+// both keys are live and no crash can leave the old key dangling). When backed
+// by a *sql.Tx already (composed into a caller's transaction) it runs the two
+// statements directly — they are already atomic within that outer transaction.
+func (r *WorkloadKeyRepo) RotateAtomically(ctx context.Context, oldID domain.KeyID, newKey domain.APIKey) error {
+	beginner, ok := r.db.(txBeginner)
+	if !ok {
+		// Already inside a caller-owned *sql.Tx: the two statements below are
+		// atomic within it, so run them directly.
+		return rotateSwap(ctx, r.db, oldID, newKey)
+	}
+	tx, err := beginner.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if err := rotateSwap(ctx, tx, oldID, newKey); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+// rotateSwap performs the delete-old + insert-new pair over the given executor
+// (a *sql.DB, *sql.Tx, or this package's DB). The delete must affect exactly one
+// row (ErrNotFound otherwise); a duplicate insert maps to ErrConflict.
+func rotateSwap(ctx context.Context, db DB, oldID domain.KeyID, newKey domain.APIKey) error {
+	res, err := db.ExecContext(ctx, `DELETE FROM authgo_workload_keys WHERE id = $1`, oldID.String())
+	if err != nil {
+		return err
+	}
+	if err := requireOneRow(res); err != nil {
+		return err
+	}
+	snap := newKey.Snapshot()
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO authgo_workload_keys (id, hash, worker_id, scope, expires_at, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		snap.ID, snap.Hash, snap.WorkerID, pgTextArray(snap.Scope), snap.ExpiresAt, snap.CreatedAt,
+	)
+	if isUniqueViolation(err) {
+		return domain.ErrConflict
+	}
+	return err
+}
+
 // pgScope scans a Postgres TEXT[] into a []string without a driver dependency,
 // parsing the canonical array literal (e.g. {a:b,c:*}). Entries here are
 // library-controlled "resource:action" tokens, so they never contain commas,
@@ -396,9 +529,12 @@ func isUniqueViolation(err error) bool {
 
 // Port assertions.
 var (
+	_ domain.UserRepository      = (*UserRepo)(nil)
 	_ domain.SessionRepository   = (*SessionRepo)(nil)
 	_ domain.MagicLinkRepository = (*MagicLinkRepo)(nil)
+	_ domain.TOTPRepository      = (*TOTPRepo)(nil)
 	_ domain.PasskeyRepository   = (*PasskeyRepo)(nil)
 	_ domain.LoginAttemptStore   = (*LoginAttemptRepo)(nil)
 	_ domain.WorkloadStore       = (*WorkloadKeyRepo)(nil)
+	_ domain.AtomicRotator       = (*WorkloadKeyRepo)(nil)
 )

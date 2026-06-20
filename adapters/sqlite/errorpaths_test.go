@@ -34,6 +34,14 @@ func TestErrorPaths_ClosedDB(t *testing.T) {
 	ctx := context.Background()
 	db := closedDB(t)
 
+	users := sqlite.NewUserRepo(db)
+	if _, err := users.GetUser(ctx, uid(t, "u1")); err == nil {
+		t.Fatal("User.GetUser on closed DB must error")
+	}
+	if err := users.UpsertUser(ctx, domain.User{}); err == nil {
+		t.Fatal("User.UpsertUser on closed DB must error")
+	}
+
 	session := sqlite.NewSessionRepo(db)
 	if err := session.Save(ctx, domain.Session{}); err == nil {
 		t.Fatal("Save on closed DB must error")
@@ -57,6 +65,17 @@ func TestErrorPaths_ClosedDB(t *testing.T) {
 	}
 	if err := ml.MarkConsumed(ctx, "x"); err == nil {
 		t.Fatal("MarkConsumed on closed DB must error")
+	}
+
+	totp := sqlite.NewTOTPRepo(db)
+	if _, err := totp.GetSecret(ctx, uid(t, "u1")); err == nil {
+		t.Fatal("TOTP.GetSecret on closed DB must error")
+	}
+	if err := totp.SetSecret(ctx, uid(t, "u1"), domain.TOTPSecret{}); err == nil {
+		t.Fatal("TOTP.SetSecret on closed DB must error")
+	}
+	if err := totp.DeleteSecret(ctx, uid(t, "u1")); err == nil {
+		t.Fatal("TOTP.DeleteSecret on closed DB must error")
 	}
 
 	pk := sqlite.NewPasskeyRepo(db)
@@ -105,6 +124,36 @@ func TestErrorPaths_ClosedDB(t *testing.T) {
 func TestErrorPaths_CorruptTimestamps(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
+
+	// User with a corrupt created_at.
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO authgo_users (id, tenant_id, email, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?)`, "u", "t", "a@b.co", "garbage", "garbage"); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	if _, err := sqlite.NewUserRepo(db).GetUser(ctx, uid(t, "u")); err == nil {
+		t.Fatal("GetUser must reject a corrupt created_at")
+	}
+	// A second user with a valid created_at but a corrupt updated_at exercises
+	// the second decode branch.
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO authgo_users (id, tenant_id, email, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?)`, "u2", "t", "a@b.co", time.Now().UTC().Format(time.RFC3339Nano), "garbage"); err != nil {
+		t.Fatalf("seed user2: %v", err)
+	}
+	if _, err := sqlite.NewUserRepo(db).GetUser(ctx, uid(t, "u2")); err == nil {
+		t.Fatal("GetUser must reject a corrupt updated_at")
+	}
+
+	// TOTP secret that is not valid base32 — GetSecret must surface the decode
+	// error rather than return a garbage secret.
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO authgo_totp_secrets (user_id, secret) VALUES (?, ?)`, "u-totp", "not!base32!"); err != nil {
+		t.Fatalf("seed totp: %v", err)
+	}
+	if _, err := sqlite.NewTOTPRepo(db).GetSecret(ctx, uid(t, "u-totp")); err == nil {
+		t.Fatal("GetSecret must reject a corrupt secret")
+	}
 
 	// Session with a corrupt created_at.
 	if _, err := db.ExecContext(ctx,

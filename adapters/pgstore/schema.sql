@@ -2,6 +2,15 @@
 -- Tables are tenant-aware; combine with Row-Level Security per the Klarlabs
 -- product standard (tenant_id derived server-side, never from the client).
 
+CREATE TABLE IF NOT EXISTS authgo_users (
+    id          TEXT        PRIMARY KEY,
+    tenant_id   TEXT        NOT NULL,
+    email       TEXT        NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL,
+    updated_at  TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS authgo_users_tenant_idx ON authgo_users (tenant_id);
+
 CREATE TABLE IF NOT EXISTS authgo_sessions (
     token       TEXT        PRIMARY KEY,
     user_id     TEXT        NOT NULL,
@@ -17,6 +26,14 @@ CREATE TABLE IF NOT EXISTS authgo_magic_links (
     tenant_id   TEXT        NOT NULL,
     expires_at  TIMESTAMPTZ NOT NULL,
     consumed    BOOLEAN     NOT NULL DEFAULT FALSE
+);
+
+-- Enrolled TOTP secrets, one per user. The base32 secret is a credential;
+-- protect this column the way you protect any shared secret (e.g. pgcrypto or
+-- a protected schema).
+CREATE TABLE IF NOT EXISTS authgo_totp_secrets (
+    user_id     TEXT        PRIMARY KEY,
+    secret      TEXT        NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS authgo_passkeys (

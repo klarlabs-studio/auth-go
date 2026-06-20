@@ -113,6 +113,62 @@ func TestPasswordHash_SaltUniqueness(t *testing.T) {
 	}
 }
 
+// ── User ────────────────────────────────────────────────────
+
+func TestUser_ValidationAndAccessors(t *testing.T) {
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	id := mustUserID(t, "u1")
+	tn := mustTenantID(t, "t1")
+	em := mustEmail(t, "felix@klarlabs.de")
+
+	u, err := domain.NewUser(id, tn, em, now, now)
+	if err != nil {
+		t.Fatalf("NewUser: %v", err)
+	}
+	if u.ID() != id || u.TenantID() != tn || u.Email().String() != "felix@klarlabs.de" {
+		t.Fatalf("accessors mismatch: %+v", u)
+	}
+	if !u.CreatedAt().Equal(now) || !u.UpdatedAt().Equal(now) {
+		t.Fatalf("timestamps mismatch: %+v", u)
+	}
+	if u.IsZero() {
+		t.Fatal("constructed user reports zero")
+	}
+	if !(domain.User{}).IsZero() {
+		t.Fatal("zero user must report zero")
+	}
+
+	// Identity fields are required.
+	if _, err := domain.NewUser(domain.UserID{}, tn, em, now, now); !errors.Is(err, domain.ErrInvalidUserID) {
+		t.Fatalf("zero id: want ErrInvalidUserID, got %v", err)
+	}
+	if _, err := domain.NewUser(id, domain.TenantID{}, em, now, now); !errors.Is(err, domain.ErrInvalidTenantID) {
+		t.Fatalf("zero tenant: want ErrInvalidTenantID, got %v", err)
+	}
+	if _, err := domain.NewUser(id, tn, domain.Email{}, now, now); !errors.Is(err, domain.ErrInvalidEmail) {
+		t.Fatalf("zero email: want ErrInvalidEmail, got %v", err)
+	}
+}
+
+func TestUser_SnapshotRoundTrip(t *testing.T) {
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	u, err := domain.NewUser(mustUserID(t, "u1"), mustTenantID(t, "t1"), mustEmail(t, "a@b.com"), now, now.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap := u.Snapshot()
+	if snap.ID != "u1" || snap.TenantID != "t1" || snap.Email != "a@b.com" {
+		t.Fatalf("snapshot fields: %+v", snap)
+	}
+	got := domain.UserFromSnapshot(snap)
+	if got.ID() != u.ID() || got.TenantID() != u.TenantID() || got.Email().String() != u.Email().String() {
+		t.Fatalf("round-trip mismatch: %+v vs %+v", got, u)
+	}
+	if !got.CreatedAt().Equal(now) || !got.UpdatedAt().Equal(now.Add(time.Hour)) {
+		t.Fatalf("round-trip timestamps: %+v", got)
+	}
+}
+
 // ── TOTP ────────────────────────────────────────────────────
 
 func TestTOTP_RFC6238Vector(t *testing.T) {
@@ -213,6 +269,102 @@ func TestSessionService_RevokeAll(t *testing.T) {
 	}
 	if _, err := svc.Validate(ctx, other.Token()); err != nil {
 		t.Fatalf("revoke-all hit another user: %v", err)
+	}
+}
+
+func TestSessionService_Rotate(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	repo := memory.NewSessionRepo()
+	svc := domain.NewSessionService(repo, time.Hour, fixedClock(&now))
+
+	old, err := svc.Issue(ctx, mustUserID(t, "u1"), mustTenantID(t, "t1"))
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+
+	// Advance the clock so a fresh expiry window is observable.
+	now = now.Add(10 * time.Minute)
+	fresh, err := svc.Rotate(ctx, old.Token())
+	if err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+
+	// New token differs from the old one.
+	if fresh.Token().String() == old.Token().String() {
+		t.Fatal("rotate reused the session token")
+	}
+	// New session preserves the principal and tenant.
+	if fresh.UserID().String() != "u1" || fresh.TenantID().String() != "t1" {
+		t.Fatalf("rotate lost identity: %+v", fresh.Snapshot())
+	}
+	// New session carries a fresh full lifetime from the rotation instant
+	// (session fixation: the lifetime restarts, it does not inherit the old one).
+	if !fresh.ExpiresAt().Equal(now.Add(time.Hour)) {
+		t.Fatalf("rotate did not reset lifetime: got %s want %s", fresh.ExpiresAt(), now.Add(time.Hour))
+	}
+
+	// Old token is invalidated.
+	if _, err := svc.Validate(ctx, old.Token()); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("old token survived rotate: %v", err)
+	}
+	// New token validates.
+	if _, err := svc.Validate(ctx, fresh.Token()); err != nil {
+		t.Fatalf("new token invalid: %v", err)
+	}
+
+	// Rotating an unknown token returns ErrNotFound and issues nothing.
+	unknown, _ := domain.TokenFromString("does-not-exist")
+	if _, err := svc.Rotate(ctx, unknown); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("rotate unknown: want ErrNotFound, got %v", err)
+	}
+
+	// Rotating an expired token returns ErrExpired and issues nothing.
+	stale, _ := svc.Issue(ctx, mustUserID(t, "u9"), mustTenantID(t, "t1"))
+	now = now.Add(2 * time.Hour)
+	if _, err := svc.Rotate(ctx, stale.Token()); !errors.Is(err, domain.ErrExpired) {
+		t.Fatalf("rotate expired: want ErrExpired, got %v", err)
+	}
+}
+
+// failSessionRepo wraps a SessionRepository and forces Delete to fail for a
+// specific token, to drive the Rotate rollback branch.
+type failSessionRepo struct {
+	domain.SessionRepository
+	failToken string
+	deleteErr error
+}
+
+func (f *failSessionRepo) Delete(ctx context.Context, token domain.Token) error {
+	if f.deleteErr != nil && token.String() == f.failToken {
+		return f.deleteErr
+	}
+	return f.SessionRepository.Delete(ctx, token)
+}
+
+func TestSessionService_RotateDeleteFailureRollsBack(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	base := memory.NewSessionRepo()
+	fr := &failSessionRepo{SessionRepository: base}
+	svc := domain.NewSessionService(fr, time.Hour, fixedClock(&now))
+
+	old, err := svc.Issue(ctx, mustUserID(t, "u1"), mustTenantID(t, "t1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sentinel := errors.New("db down")
+	fr.failToken = old.Token().String()
+	fr.deleteErr = sentinel
+
+	if _, err := svc.Rotate(ctx, old.Token()); !errors.Is(err, sentinel) {
+		t.Fatalf("rotate delete error: want sentinel, got %v", err)
+	}
+	fr.deleteErr = nil
+
+	// The new session was rolled back; only the old one remains.
+	if _, err := svc.Validate(ctx, old.Token()); err != nil {
+		t.Fatalf("old session lost after failed rotate: %v", err)
 	}
 }
 

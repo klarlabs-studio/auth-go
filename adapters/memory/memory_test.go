@@ -47,6 +47,56 @@ func tid(t *testing.T, s string) domain.TenantID {
 	return id
 }
 
+func email(t *testing.T, s string) domain.Email {
+	t.Helper()
+	e, err := domain.NewEmail(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return e
+}
+
+func mustUser(t *testing.T, id, tenant, addr string, ts time.Time) domain.User {
+	t.Helper()
+	u, err := domain.NewUser(uid(t, id), tid(t, tenant), email(t, addr), ts, ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u
+}
+
+func TestUserRepo(t *testing.T) {
+	ctx := context.Background()
+	repo := memory.NewUserRepo()
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+
+	if _, err := repo.GetUser(ctx, uid(t, "u1")); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("missing user: want ErrNotFound, got %v", err)
+	}
+
+	u := mustUser(t, "u1", "t1", "a@b.com", now)
+	if err := repo.UpsertUser(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+	got, err := repo.GetUser(ctx, uid(t, "u1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Email().String() != "a@b.com" || got.TenantID().String() != "t1" {
+		t.Fatalf("get mismatch: %+v", got.Snapshot())
+	}
+
+	// Upsert updates in place (same ID).
+	updated := mustUser(t, "u1", "t1", "c@d.com", now.Add(time.Hour))
+	if err := repo.UpsertUser(ctx, updated); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = repo.GetUser(ctx, uid(t, "u1"))
+	if got.Email().String() != "c@d.com" {
+		t.Fatalf("upsert did not update: %+v", got.Snapshot())
+	}
+}
+
 func TestSessionRepo(t *testing.T) {
 	ctx := context.Background()
 	repo := memory.NewSessionRepo()
@@ -119,6 +169,51 @@ func TestPasskeyRepo(t *testing.T) {
 	final, _ := repo.ListByUser(ctx, u)
 	if len(final) != 0 {
 		t.Fatal("delete failed")
+	}
+}
+
+func TestTOTPRepo(t *testing.T) {
+	ctx := context.Background()
+	repo := memory.NewTOTPRepo()
+	u := uid(t, "u1")
+
+	if _, err := repo.GetSecret(ctx, u); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("missing secret: want ErrNotFound, got %v", err)
+	}
+	if err := repo.DeleteSecret(ctx, u); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("delete missing: want ErrNotFound, got %v", err)
+	}
+
+	secret, err := domain.NewTOTPSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SetSecret(ctx, u, secret); err != nil {
+		t.Fatal(err)
+	}
+	got, err := repo.GetSecret(ctx, u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.String() != secret.String() {
+		t.Fatalf("secret round-trip mismatch: %q vs %q", got.String(), secret.String())
+	}
+
+	// SetSecret replaces in place.
+	other, _ := domain.NewTOTPSecret()
+	if err := repo.SetSecret(ctx, u, other); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = repo.GetSecret(ctx, u)
+	if got.String() != other.String() {
+		t.Fatal("SetSecret did not replace")
+	}
+
+	if err := repo.DeleteSecret(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.GetSecret(ctx, u); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("after delete: want ErrNotFound, got %v", err)
 	}
 }
 

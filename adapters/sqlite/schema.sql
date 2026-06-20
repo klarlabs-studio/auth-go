@@ -14,6 +14,15 @@
 --   * now()       → handled in Go (the adapter stamps updated_at), so the
 --     schema carries no function-valued default.
 
+CREATE TABLE IF NOT EXISTS authgo_users (
+    id          TEXT PRIMARY KEY,
+    tenant_id   TEXT NOT NULL,
+    email       TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS authgo_users_tenant_idx ON authgo_users (tenant_id);
+
 CREATE TABLE IF NOT EXISTS authgo_sessions (
     token       TEXT PRIMARY KEY,
     user_id     TEXT NOT NULL,
@@ -29,6 +38,13 @@ CREATE TABLE IF NOT EXISTS authgo_magic_links (
     tenant_id   TEXT NOT NULL,
     expires_at  TEXT NOT NULL,
     consumed    INTEGER NOT NULL DEFAULT 0
+);
+
+-- Enrolled TOTP secrets, one per user. The base32 secret is a credential;
+-- protect this column the way you protect any shared secret.
+CREATE TABLE IF NOT EXISTS authgo_totp_secrets (
+    user_id     TEXT PRIMARY KEY,
+    secret      TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS authgo_passkeys (

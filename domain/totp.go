@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha1" //nolint:gosec // RFC 6238 mandates HMAC-SHA1 for TOTP; authenticator apps require it.
@@ -44,6 +45,30 @@ func TOTPSecretFromString(s string) (TOTPSecret, error) {
 
 // String returns the base32 secret for storage.
 func (s TOTPSecret) String() string { return s.v }
+
+// IsZero reports whether the secret is unset.
+func (s TOTPSecret) IsZero() bool { return s.v == "" }
+
+// TOTPRepository is the persistence port for a user's enrolled TOTP secret —
+// the per-user shared secret behind RFC 6238 codes. It closes the spec's "TOTP,
+// passkey credential methods..." Store gap so callers do not have to own secret
+// storage themselves: enroll on SetSecret, load on GetSecret to validate a code,
+// and DeleteSecret to disenroll.
+//
+// The base32 secret is a credential: adapters store TOTPSecret.String() verbatim
+// and SHOULD protect the column the way they protect any shared secret (e.g.
+// column encryption or a protected schema). Implementations must be safe for
+// concurrent use. Every method takes a context.Context first so storage I/O
+// honors cancellation, deadlines, and trace propagation.
+type TOTPRepository interface {
+	// GetSecret returns the user's enrolled secret or ErrNotFound.
+	GetSecret(ctx context.Context, userID UserID) (TOTPSecret, error)
+	// SetSecret enrolls (or replaces) the user's secret.
+	SetSecret(ctx context.Context, userID UserID, secret TOTPSecret) error
+	// DeleteSecret removes the user's secret (disenroll). Removing an absent
+	// secret returns ErrNotFound.
+	DeleteSecret(ctx context.Context, userID UserID) error
+}
 
 // TOTPConfig parameterizes the OTP algorithm (RFC 6238 defaults).
 type TOTPConfig struct {
