@@ -1,6 +1,7 @@
 package domain_test
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -166,10 +167,11 @@ func TestNewWorkloadToken_EntropyAndFormat(t *testing.T) {
 
 func TestAPIKey_SnapshotRoundTrip(t *testing.T) {
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	ctx := context.Background()
 	repo := memory.NewWorkloadKeyRepo()
 	svc := domain.NewWorkloadKeyService(repo, fixedClock(&now))
 
-	key, raw, err := svc.IssueKey(domain.KeyRequest{
+	key, raw, err := svc.IssueKey(ctx, domain.KeyRequest{
 		WorkerID:  mustWorkerID(t, "agent-1"),
 		Scope:     mustScope(t, "tools:*"),
 		ExpiresAt: now.Add(time.Hour),
@@ -203,10 +205,11 @@ func mustPerm(t *testing.T, s string) domain.Permission {
 
 func TestWorkloadKeyService_IssueStoresHashOnly(t *testing.T) {
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	ctx := context.Background()
 	repo := memory.NewWorkloadKeyRepo()
 	svc := domain.NewWorkloadKeyService(repo, fixedClock(&now))
 
-	key, raw, err := svc.IssueKey(domain.KeyRequest{
+	key, raw, err := svc.IssueKey(ctx, domain.KeyRequest{
 		WorkerID:  mustWorkerID(t, "agent-1"),
 		Scope:     mustScope(t, "tools:read"),
 		ExpiresAt: now.Add(time.Hour),
@@ -218,11 +221,11 @@ func TestWorkloadKeyService_IssueStoresHashOnly(t *testing.T) {
 		t.Fatal("raw token empty")
 	}
 	// The raw token must NEVER be a storage key.
-	if _, err := repo.GetKeyByHash(raw.String()); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := repo.GetKeyByHash(ctx, raw.String()); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatal("raw token used as storage key — must be hashed")
 	}
 	// The hash must be retrievable.
-	stored, err := repo.GetKeyByHash(domain.HashWorkloadToken(raw))
+	stored, err := repo.GetKeyByHash(ctx, domain.HashWorkloadToken(raw))
 	if err != nil {
 		t.Fatalf("hash lookup: %v", err)
 	}
@@ -237,24 +240,25 @@ func TestWorkloadKeyService_IssueStoresHashOnly(t *testing.T) {
 
 func TestWorkloadKeyService_RejectsBadRequest(t *testing.T) {
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	ctx := context.Background()
 	svc := domain.NewWorkloadKeyService(memory.NewWorkloadKeyRepo(), fixedClock(&now))
 
 	// zero worker
-	if _, _, err := svc.IssueKey(domain.KeyRequest{
+	if _, _, err := svc.IssueKey(ctx, domain.KeyRequest{
 		Scope:     mustScope(t, "tools:*"),
 		ExpiresAt: now.Add(time.Hour),
 	}); !errors.Is(err, domain.ErrInvalidWorkerID) {
 		t.Fatalf("zero worker: want ErrInvalidWorkerID, got %v", err)
 	}
 	// empty scope
-	if _, _, err := svc.IssueKey(domain.KeyRequest{
+	if _, _, err := svc.IssueKey(ctx, domain.KeyRequest{
 		WorkerID:  mustWorkerID(t, "a"),
 		ExpiresAt: now.Add(time.Hour),
 	}); !errors.Is(err, domain.ErrInvalidScope) {
 		t.Fatalf("zero scope: want ErrInvalidScope, got %v", err)
 	}
 	// expiry in the past
-	if _, _, err := svc.IssueKey(domain.KeyRequest{
+	if _, _, err := svc.IssueKey(ctx, domain.KeyRequest{
 		WorkerID:  mustWorkerID(t, "a"),
 		Scope:     mustScope(t, "tools:*"),
 		ExpiresAt: now.Add(-time.Hour),
@@ -265,10 +269,11 @@ func TestWorkloadKeyService_RejectsBadRequest(t *testing.T) {
 
 func TestWorkloadKeyService_Validate(t *testing.T) {
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	ctx := context.Background()
 	repo := memory.NewWorkloadKeyRepo()
 	svc := domain.NewWorkloadKeyService(repo, fixedClock(&now))
 
-	_, raw, err := svc.IssueKey(domain.KeyRequest{
+	_, raw, err := svc.IssueKey(ctx, domain.KeyRequest{
 		WorkerID:  mustWorkerID(t, "agent-1"),
 		Scope:     mustScope(t, "tools:read", "memory:*"),
 		ExpiresAt: now.Add(time.Hour),
@@ -277,7 +282,7 @@ func TestWorkloadKeyService_Validate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	claims, err := svc.ValidateKey(raw)
+	claims, err := svc.ValidateKey(ctx, raw)
 	if err != nil {
 		t.Fatalf("validate: %v", err)
 	}
@@ -290,13 +295,13 @@ func TestWorkloadKeyService_Validate(t *testing.T) {
 
 	// Unknown token → ErrKeyNotFound.
 	other, _ := domain.NewWorkloadToken()
-	if _, err := svc.ValidateKey(other); !errors.Is(err, domain.ErrKeyNotFound) {
+	if _, err := svc.ValidateKey(ctx, other); !errors.Is(err, domain.ErrKeyNotFound) {
 		t.Fatalf("unknown token: want ErrKeyNotFound, got %v", err)
 	}
 
 	// Expired token → ErrKeyExpired.
 	now = now.Add(2 * time.Hour)
-	if _, err := svc.ValidateKey(raw); !errors.Is(err, domain.ErrKeyExpired) {
+	if _, err := svc.ValidateKey(ctx, raw); !errors.Is(err, domain.ErrKeyExpired) {
 		t.Fatalf("expired: want ErrKeyExpired, got %v", err)
 	}
 }
@@ -305,10 +310,11 @@ func TestWorkloadKeyService_Validate(t *testing.T) {
 
 func TestWorkloadKeyService_Authorize(t *testing.T) {
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	ctx := context.Background()
 	repo := memory.NewWorkloadKeyRepo()
 	svc := domain.NewWorkloadKeyService(repo, fixedClock(&now))
 
-	_, raw, err := svc.IssueKey(domain.KeyRequest{
+	_, raw, err := svc.IssueKey(ctx, domain.KeyRequest{
 		WorkerID:  mustWorkerID(t, "agent-1"),
 		Scope:     mustScope(t, "tools:*"),
 		ExpiresAt: now.Add(time.Hour),
@@ -318,20 +324,20 @@ func TestWorkloadKeyService_Authorize(t *testing.T) {
 	}
 
 	// match (wildcard)
-	if err := svc.Authorize(raw, "tools:read"); err != nil {
+	if err := svc.Authorize(ctx, raw, "tools:read"); err != nil {
 		t.Fatalf("authorize match: %v", err)
 	}
 	// no match
-	if err := svc.Authorize(raw, "memory:read"); !errors.Is(err, domain.ErrScopeDenied) {
+	if err := svc.Authorize(ctx, raw, "memory:read"); !errors.Is(err, domain.ErrScopeDenied) {
 		t.Fatalf("authorize no-match: want ErrScopeDenied, got %v", err)
 	}
 	// malformed permission
-	if err := svc.Authorize(raw, "garbage"); !errors.Is(err, domain.ErrInvalidScope) {
+	if err := svc.Authorize(ctx, raw, "garbage"); !errors.Is(err, domain.ErrInvalidScope) {
 		t.Fatalf("authorize bad perm: want ErrInvalidScope, got %v", err)
 	}
 	// expired
 	now = now.Add(2 * time.Hour)
-	if err := svc.Authorize(raw, "tools:read"); !errors.Is(err, domain.ErrKeyExpired) {
+	if err := svc.Authorize(ctx, raw, "tools:read"); !errors.Is(err, domain.ErrKeyExpired) {
 		t.Fatalf("authorize expired: want ErrKeyExpired, got %v", err)
 	}
 }
@@ -340,16 +346,17 @@ func TestWorkloadKeyService_Authorize(t *testing.T) {
 
 func TestWorkloadKeyService_RevokeAndList(t *testing.T) {
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	ctx := context.Background()
 	repo := memory.NewWorkloadKeyRepo()
 	svc := domain.NewWorkloadKeyService(repo, fixedClock(&now))
 
 	w := mustWorkerID(t, "agent-1")
-	k1, raw1, _ := svc.IssueKey(domain.KeyRequest{WorkerID: w, Scope: mustScope(t, "tools:*"), ExpiresAt: now.Add(time.Hour)})
-	_, raw2, _ := svc.IssueKey(domain.KeyRequest{WorkerID: w, Scope: mustScope(t, "memory:*"), ExpiresAt: now.Add(time.Hour)})
+	k1, raw1, _ := svc.IssueKey(ctx, domain.KeyRequest{WorkerID: w, Scope: mustScope(t, "tools:*"), ExpiresAt: now.Add(time.Hour)})
+	_, raw2, _ := svc.IssueKey(ctx, domain.KeyRequest{WorkerID: w, Scope: mustScope(t, "memory:*"), ExpiresAt: now.Add(time.Hour)})
 	other := mustWorkerID(t, "agent-2")
-	_, rawO, _ := svc.IssueKey(domain.KeyRequest{WorkerID: other, Scope: mustScope(t, "tools:*"), ExpiresAt: now.Add(time.Hour)})
+	_, rawO, _ := svc.IssueKey(ctx, domain.KeyRequest{WorkerID: other, Scope: mustScope(t, "tools:*"), ExpiresAt: now.Add(time.Hour)})
 
-	keys, err := svc.ListKeys(w)
+	keys, err := svc.ListKeys(ctx, w)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,33 +365,33 @@ func TestWorkloadKeyService_RevokeAndList(t *testing.T) {
 	}
 
 	// Revoke one.
-	if err := svc.RevokeKey(k1.ID()); err != nil {
+	if err := svc.RevokeKey(ctx, k1.ID()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.ValidateKey(raw1); !errors.Is(err, domain.ErrKeyNotFound) {
+	if _, err := svc.ValidateKey(ctx, raw1); !errors.Is(err, domain.ErrKeyNotFound) {
 		t.Fatalf("revoked key still valid: %v", err)
 	}
-	if _, err := svc.ValidateKey(raw2); err != nil {
+	if _, err := svc.ValidateKey(ctx, raw2); err != nil {
 		t.Fatalf("revoke hit wrong key: %v", err)
 	}
 
 	// Revoke unknown ID → ErrKeyNotFound.
-	if err := svc.RevokeKey(domain.KeyID("nope")); !errors.Is(err, domain.ErrKeyNotFound) {
+	if err := svc.RevokeKey(ctx, domain.KeyID("nope")); !errors.Is(err, domain.ErrKeyNotFound) {
 		t.Fatalf("revoke unknown: want ErrKeyNotFound, got %v", err)
 	}
 
 	// Revoke all for worker.
-	if err := svc.RevokeAllKeys(w); err != nil {
+	if err := svc.RevokeAllKeys(ctx, w); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.ValidateKey(raw2); !errors.Is(err, domain.ErrKeyNotFound) {
+	if _, err := svc.ValidateKey(ctx, raw2); !errors.Is(err, domain.ErrKeyNotFound) {
 		t.Fatalf("revoke-all missed a key: %v", err)
 	}
 	// Other worker survives.
-	if _, err := svc.ValidateKey(rawO); err != nil {
+	if _, err := svc.ValidateKey(ctx, rawO); err != nil {
 		t.Fatalf("revoke-all hit another worker: %v", err)
 	}
-	left, _ := svc.ListKeys(w)
+	left, _ := svc.ListKeys(ctx, w)
 	if len(left) != 0 {
 		t.Fatalf("revoke-all left keys: %+v", left)
 	}
@@ -394,17 +401,18 @@ func TestWorkloadKeyService_RevokeAndList(t *testing.T) {
 
 func TestWorkloadKeyService_Rotate(t *testing.T) {
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	ctx := context.Background()
 	repo := memory.NewWorkloadKeyRepo()
 	svc := domain.NewWorkloadKeyService(repo, fixedClock(&now))
 
 	w := mustWorkerID(t, "agent-1")
-	old, oldRaw, _ := svc.IssueKey(domain.KeyRequest{
+	old, oldRaw, _ := svc.IssueKey(ctx, domain.KeyRequest{
 		WorkerID:  w,
 		Scope:     mustScope(t, "tools:read", "memory:*"),
 		ExpiresAt: now.Add(time.Hour),
 	})
 
-	newKey, newRaw, err := svc.RotateKey(old.ID())
+	newKey, newRaw, err := svc.RotateKey(ctx, old.ID())
 	if err != nil {
 		t.Fatalf("rotate: %v", err)
 	}
@@ -416,11 +424,11 @@ func TestWorkloadKeyService_Rotate(t *testing.T) {
 		t.Fatal("rotate reused token")
 	}
 	// Old token invalid.
-	if _, err := svc.ValidateKey(oldRaw); !errors.Is(err, domain.ErrKeyNotFound) {
+	if _, err := svc.ValidateKey(ctx, oldRaw); !errors.Is(err, domain.ErrKeyNotFound) {
 		t.Fatalf("old token survived rotate: %v", err)
 	}
 	// New token valid and preserves scope + worker + expiry.
-	claims, err := svc.ValidateKey(newRaw)
+	claims, err := svc.ValidateKey(ctx, newRaw)
 	if err != nil {
 		t.Fatalf("new token invalid: %v", err)
 	}
@@ -435,7 +443,7 @@ func TestWorkloadKeyService_Rotate(t *testing.T) {
 	}
 
 	// Rotate unknown → ErrKeyNotFound.
-	if _, _, err := svc.RotateKey(domain.KeyID("nope")); !errors.Is(err, domain.ErrKeyNotFound) {
+	if _, _, err := svc.RotateKey(ctx, domain.KeyID("nope")); !errors.Is(err, domain.ErrKeyNotFound) {
 		t.Fatalf("rotate unknown: want ErrKeyNotFound, got %v", err)
 	}
 }
@@ -445,7 +453,7 @@ func TestWorkloadKeyService_Rotate(t *testing.T) {
 func TestAPIKey_AccessorsAndPermissionParts(t *testing.T) {
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
 	svc := domain.NewWorkloadKeyService(memory.NewWorkloadKeyRepo(), fixedClock(&now))
-	key, raw, err := svc.IssueKey(domain.KeyRequest{
+	key, raw, err := svc.IssueKey(context.Background(), domain.KeyRequest{
 		WorkerID:  mustWorkerID(t, "agent-1"),
 		Scope:     mustScope(t, "tools:read"),
 		ExpiresAt: now.Add(time.Hour),
@@ -486,28 +494,29 @@ type failStore struct {
 	deleteErr    error
 }
 
-func (f *failStore) CreateKey(k domain.APIKey) error {
+func (f *failStore) CreateKey(ctx context.Context, k domain.APIKey) error {
 	if f.failCreate != nil {
 		return f.failCreate
 	}
-	return f.WorkloadStore.CreateKey(k)
+	return f.WorkloadStore.CreateKey(ctx, k)
 }
 
-func (f *failStore) DeleteKey(id domain.KeyID) error {
+func (f *failStore) DeleteKey(ctx context.Context, id domain.KeyID) error {
 	if f.deleteErr != nil && id == f.failDeleteID {
 		return f.deleteErr
 	}
-	return f.WorkloadStore.DeleteKey(id)
+	return f.WorkloadStore.DeleteKey(ctx, id)
 }
 
 func TestWorkloadKeyService_StoreErrorsSurface(t *testing.T) {
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	ctx := context.Background()
 	sentinel := errors.New("db down")
 
 	// IssueKey surfaces CreateKey errors.
 	fs := &failStore{WorkloadStore: memory.NewWorkloadKeyRepo(), failCreate: sentinel}
 	svc := domain.NewWorkloadKeyService(fs, fixedClock(&now))
-	if _, _, err := svc.IssueKey(domain.KeyRequest{
+	if _, _, err := svc.IssueKey(ctx, domain.KeyRequest{
 		WorkerID: mustWorkerID(t, "a"), Scope: mustScope(t, "tools:*"), ExpiresAt: now.Add(time.Hour),
 	}); !errors.Is(err, sentinel) {
 		t.Fatalf("issue create error: want sentinel, got %v", err)
@@ -517,7 +526,7 @@ func TestWorkloadKeyService_StoreErrorsSurface(t *testing.T) {
 	base := memory.NewWorkloadKeyRepo()
 	fs2 := &failStore{WorkloadStore: base}
 	svc2 := domain.NewWorkloadKeyService(fs2, fixedClock(&now))
-	old, _, err := svc2.IssueKey(domain.KeyRequest{
+	old, _, err := svc2.IssueKey(ctx, domain.KeyRequest{
 		WorkerID: mustWorkerID(t, "a"), Scope: mustScope(t, "tools:*"), ExpiresAt: now.Add(time.Hour),
 	})
 	if err != nil {
@@ -527,13 +536,13 @@ func TestWorkloadKeyService_StoreErrorsSurface(t *testing.T) {
 	// then succeeds, so exactly the original key remains.
 	fs2.failDeleteID = old.ID()
 	fs2.deleteErr = sentinel
-	if _, _, err := svc2.RotateKey(old.ID()); !errors.Is(err, sentinel) {
+	if _, _, err := svc2.RotateKey(ctx, old.ID()); !errors.Is(err, sentinel) {
 		t.Fatalf("rotate delete error: want sentinel, got %v", err)
 	}
 	fs2.deleteErr = nil
 	// Exactly one key remains — the rollback removed the new one and the old one
 	// was never deleted (its delete failed).
-	left, _ := base.ListKeysByWorker(mustWorkerID(t, "a"))
+	left, _ := base.ListKeysByWorker(ctx, mustWorkerID(t, "a"))
 	if len(left) != 1 || left[0].ID() != old.ID() {
 		t.Fatalf("rollback left wrong keys: %+v", left)
 	}
@@ -543,7 +552,7 @@ func TestWorkloadKeyService_RejectsExpiredOnIssueIsImmediate(t *testing.T) {
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
 	svc := domain.NewWorkloadKeyService(memory.NewWorkloadKeyRepo(), fixedClock(&now))
 	// expiry exactly now → treated as already expired (not after now).
-	if _, _, err := svc.IssueKey(domain.KeyRequest{
+	if _, _, err := svc.IssueKey(context.Background(), domain.KeyRequest{
 		WorkerID:  mustWorkerID(t, "a"),
 		Scope:     mustScope(t, "tools:*"),
 		ExpiresAt: now,

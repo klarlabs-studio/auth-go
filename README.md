@@ -78,15 +78,18 @@ raw, _ := ml.Issue(emailVO, tid)    // email raw.String(); never stored
 link, err := ml.Consume(raw)        // single-use
 
 // Workload keys: scoped, time-boxed API keys for agent workers.
+// The store does I/O, so every call takes a context.Context first — it carries
+// cancellation, deadlines, and trace propagation through to Postgres.
+ctx := context.Background()          // per-request ctx in real code
 wk := domain.NewWorkloadKeyService(pgstore.NewWorkloadKeyRepo(db), nil)
 worker, _ := domain.NewWorkerID("agent-7")
 scope, _ := domain.NewScope("tools:*", "memory:read")
-key, token, _ := wk.IssueKey(domain.KeyRequest{
+key, token, _ := wk.IssueKey(ctx, domain.KeyRequest{
     WorkerID: worker, Scope: scope, ExpiresAt: time.Now().Add(24 * time.Hour),
 })                                   // hand token.String() to the worker once — never stored
-err = wk.Authorize(token, "tools:write")     // validate + scope match (wildcard)
-_, newToken, _ := wk.RotateKey(key.ID())     // atomic: new key live, old invalid
-wk.RevokeAllKeys(worker)                      // kill-switch
+err = wk.Authorize(ctx, token, "tools:write")     // validate + scope match (wildcard)
+_, newToken, _ := wk.RotateKey(ctx, key.ID())     // atomic: new key live, old invalid
+wk.RevokeAllKeys(ctx, worker)                     // kill-switch
 _ = newToken
 
 // Basic-auth handshake: Authorization: Basic once, session cookie after.

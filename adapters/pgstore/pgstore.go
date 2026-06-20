@@ -7,6 +7,7 @@
 package pgstore
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"strings"
@@ -241,18 +242,29 @@ func (r *LoginAttemptRepo) Delete(key string) error {
 	return err
 }
 
+// ctxDB is the context-aware subset of *sql.DB the workload repo needs;
+// satisfied by *sql.DB and *sql.Tx. Unlike the package-wide DB interface (used
+// by the older ctx-free repos), it carries the *Context query methods so the
+// workload store propagates cancellation, deadlines, and OTel traces through
+// ctx — the correct contract for new storage I/O.
+type ctxDB interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
 // WorkloadKeyRepo is a Postgres domain.WorkloadStore. Only the hex SHA-256 hash
 // of each token is stored (the hash column is UNIQUE for the validation hot
 // path); the raw token is never persisted. Scope is stored as a TEXT[].
-type WorkloadKeyRepo struct{ db DB }
+type WorkloadKeyRepo struct{ db ctxDB }
 
 // NewWorkloadKeyRepo builds a workload-key repository over db.
-func NewWorkloadKeyRepo(db DB) *WorkloadKeyRepo { return &WorkloadKeyRepo{db: db} }
+func NewWorkloadKeyRepo(db ctxDB) *WorkloadKeyRepo { return &WorkloadKeyRepo{db: db} }
 
 // CreateKey inserts a new key, mapping a unique-violation to domain.ErrConflict.
-func (r *WorkloadKeyRepo) CreateKey(k domain.APIKey) error {
+func (r *WorkloadKeyRepo) CreateKey(ctx context.Context, k domain.APIKey) error {
 	snap := k.Snapshot()
-	_, err := r.db.Exec(
+	_, err := r.db.ExecContext(ctx,
 		`INSERT INTO authgo_workload_keys (id, hash, worker_id, scope, expires_at, created_at)
 		 VALUES ($1, $2, $3, $4, $5, $6)`,
 		snap.ID, snap.Hash, snap.WorkerID, pgTextArray(snap.Scope), snap.ExpiresAt, snap.CreatedAt,
@@ -264,22 +276,22 @@ func (r *WorkloadKeyRepo) CreateKey(k domain.APIKey) error {
 }
 
 // GetKeyByHash loads a key by token hash or returns domain.ErrNotFound.
-func (r *WorkloadKeyRepo) GetKeyByHash(hash string) (domain.APIKey, error) {
-	return r.scanOne(`WHERE hash = $1`, hash)
+func (r *WorkloadKeyRepo) GetKeyByHash(ctx context.Context, hash string) (domain.APIKey, error) {
+	return r.scanOne(ctx, `WHERE hash = $1`, hash)
 }
 
 // GetKey loads a key by ID or returns domain.ErrNotFound.
-func (r *WorkloadKeyRepo) GetKey(id domain.KeyID) (domain.APIKey, error) {
-	return r.scanOne(`WHERE id = $1`, id.String())
+func (r *WorkloadKeyRepo) GetKey(ctx context.Context, id domain.KeyID) (domain.APIKey, error) {
+	return r.scanOne(ctx, `WHERE id = $1`, id.String())
 }
 
 // scanOne loads the single key matching where (a parameterized clause).
-func (r *WorkloadKeyRepo) scanOne(where string, arg any) (domain.APIKey, error) {
+func (r *WorkloadKeyRepo) scanOne(ctx context.Context, where string, arg any) (domain.APIKey, error) {
 	var (
 		snap  domain.APIKeySnapshot
 		scope pgScope
 	)
-	err := r.db.QueryRow(
+	err := r.db.QueryRowContext(ctx,
 		`SELECT id, hash, worker_id, scope, expires_at, created_at
 		   FROM authgo_workload_keys `+where, arg,
 	).Scan(&snap.ID, &snap.Hash, &snap.WorkerID, &scope, &snap.ExpiresAt, &snap.CreatedAt)
@@ -294,8 +306,8 @@ func (r *WorkloadKeyRepo) scanOne(where string, arg any) (domain.APIKey, error) 
 }
 
 // ListKeysByWorker returns every key for a worker.
-func (r *WorkloadKeyRepo) ListKeysByWorker(workerID domain.WorkerID) ([]domain.APIKey, error) {
-	rows, err := r.db.Query(
+func (r *WorkloadKeyRepo) ListKeysByWorker(ctx context.Context, workerID domain.WorkerID) ([]domain.APIKey, error) {
+	rows, err := r.db.QueryContext(ctx,
 		`SELECT id, hash, worker_id, scope, expires_at, created_at
 		   FROM authgo_workload_keys WHERE worker_id = $1`, workerID.String(),
 	)
@@ -320,9 +332,9 @@ func (r *WorkloadKeyRepo) ListKeysByWorker(workerID domain.WorkerID) ([]domain.A
 }
 
 // UpdateKey replaces an existing key by ID; ErrNotFound if absent.
-func (r *WorkloadKeyRepo) UpdateKey(k domain.APIKey) error {
+func (r *WorkloadKeyRepo) UpdateKey(ctx context.Context, k domain.APIKey) error {
 	snap := k.Snapshot()
-	res, err := r.db.Exec(
+	res, err := r.db.ExecContext(ctx,
 		`UPDATE authgo_workload_keys
 		    SET hash = $2, worker_id = $3, scope = $4, expires_at = $5, created_at = $6
 		  WHERE id = $1`,
@@ -335,8 +347,8 @@ func (r *WorkloadKeyRepo) UpdateKey(k domain.APIKey) error {
 }
 
 // DeleteKey removes a key by ID. Deleting an absent key returns ErrNotFound.
-func (r *WorkloadKeyRepo) DeleteKey(id domain.KeyID) error {
-	res, err := r.db.Exec(`DELETE FROM authgo_workload_keys WHERE id = $1`, id.String())
+func (r *WorkloadKeyRepo) DeleteKey(ctx context.Context, id domain.KeyID) error {
+	res, err := r.db.ExecContext(ctx, `DELETE FROM authgo_workload_keys WHERE id = $1`, id.String())
 	if err != nil {
 		return err
 	}

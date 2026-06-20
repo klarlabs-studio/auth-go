@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"context"
 	"errors"
 	"time"
 )
@@ -175,12 +176,12 @@ func randomKeyID() (KeyID, error) {
 // IssueKey generates a fresh token, persists only its hash, and returns the new
 // APIKey plus the RAW token — which the caller must surface to the worker
 // immediately, as it is never recoverable again.
-func (s *WorkloadKeyService) IssueKey(req KeyRequest) (APIKey, WorkloadToken, error) {
+func (s *WorkloadKeyService) IssueKey(ctx context.Context, req KeyRequest) (APIKey, WorkloadToken, error) {
 	key, raw, err := s.issue(req)
 	if err != nil {
 		return APIKey{}, WorkloadToken{}, err
 	}
-	if err := s.store.CreateKey(key); err != nil {
+	if err := s.store.CreateKey(ctx, key); err != nil {
 		return APIKey{}, WorkloadToken{}, err
 	}
 	return key, raw, nil
@@ -223,8 +224,8 @@ func (s *WorkloadKeyService) issue(req KeyRequest) (APIKey, WorkloadToken, error
 // ValidateKey hashes an inbound token, looks the key up, and enforces expiry,
 // returning the worker + scope claims. Returns ErrKeyNotFound for an unknown
 // token and ErrKeyExpired for an expired one.
-func (s *WorkloadKeyService) ValidateKey(token WorkloadToken) (KeyClaims, error) {
-	key, err := s.store.GetKeyByHash(HashWorkloadToken(token))
+func (s *WorkloadKeyService) ValidateKey(ctx context.Context, token WorkloadToken) (KeyClaims, error) {
+	key, err := s.store.GetKeyByHash(ctx, HashWorkloadToken(token))
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return KeyClaims{}, ErrKeyNotFound
@@ -241,12 +242,12 @@ func (s *WorkloadKeyService) ValidateKey(token WorkloadToken) (KeyClaims, error)
 // "resource:action" permission. Returns ErrInvalidScope for a malformed
 // permission, ErrScopeDenied when the key's scope does not cover it, and the
 // validation errors (ErrKeyNotFound / ErrKeyExpired) otherwise.
-func (s *WorkloadKeyService) Authorize(token WorkloadToken, permission string) error {
+func (s *WorkloadKeyService) Authorize(ctx context.Context, token WorkloadToken, permission string) error {
 	perm, err := NewPermission(permission)
 	if err != nil {
 		return err
 	}
-	claims, err := s.ValidateKey(token)
+	claims, err := s.ValidateKey(ctx, token)
 	if err != nil {
 		return err
 	}
@@ -257,8 +258,8 @@ func (s *WorkloadKeyService) Authorize(token WorkloadToken, permission string) e
 }
 
 // RevokeKey deletes one key by ID. Returns ErrKeyNotFound if absent.
-func (s *WorkloadKeyService) RevokeKey(id KeyID) error {
-	if err := s.store.DeleteKey(id); err != nil {
+func (s *WorkloadKeyService) RevokeKey(ctx context.Context, id KeyID) error {
+	if err := s.store.DeleteKey(ctx, id); err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return ErrKeyNotFound
 		}
@@ -268,13 +269,13 @@ func (s *WorkloadKeyService) RevokeKey(id KeyID) error {
 }
 
 // RevokeAllKeys deletes every key for a worker (kill-switch).
-func (s *WorkloadKeyService) RevokeAllKeys(workerID WorkerID) error {
-	keys, err := s.store.ListKeysByWorker(workerID)
+func (s *WorkloadKeyService) RevokeAllKeys(ctx context.Context, workerID WorkerID) error {
+	keys, err := s.store.ListKeysByWorker(ctx, workerID)
 	if err != nil {
 		return err
 	}
 	for _, k := range keys {
-		if err := s.store.DeleteKey(k.id); err != nil && !errors.Is(err, ErrNotFound) {
+		if err := s.store.DeleteKey(ctx, k.id); err != nil && !errors.Is(err, ErrNotFound) {
 			return err
 		}
 	}
@@ -283,8 +284,8 @@ func (s *WorkloadKeyService) RevokeAllKeys(workerID WorkerID) error {
 
 // ListKeys returns every key for a worker. Keys carry only their hash, never
 // the raw token, so they are safe to return for inventory/management UIs.
-func (s *WorkloadKeyService) ListKeys(workerID WorkerID) ([]APIKey, error) {
-	return s.store.ListKeysByWorker(workerID)
+func (s *WorkloadKeyService) ListKeys(ctx context.Context, workerID WorkerID) ([]APIKey, error) {
+	return s.store.ListKeysByWorker(ctx, workerID)
 }
 
 // RotateKey issues a replacement key — same worker, scope, and expiry — and
@@ -292,8 +293,8 @@ func (s *WorkloadKeyService) ListKeys(workerID WorkerID) ([]APIKey, error) {
 // key is created before the old is deleted so a failure never leaves the worker
 // with no usable key; if deletion of the old key fails the rotation is rolled
 // back by deleting the freshly-created key.
-func (s *WorkloadKeyService) RotateKey(id KeyID) (APIKey, WorkloadToken, error) {
-	old, err := s.store.GetKey(id)
+func (s *WorkloadKeyService) RotateKey(ctx context.Context, id KeyID) (APIKey, WorkloadToken, error) {
+	old, err := s.store.GetKey(ctx, id)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return APIKey{}, WorkloadToken{}, ErrKeyNotFound
@@ -308,13 +309,13 @@ func (s *WorkloadKeyService) RotateKey(id KeyID) (APIKey, WorkloadToken, error) 
 	if err != nil {
 		return APIKey{}, WorkloadToken{}, err
 	}
-	if err := s.store.CreateKey(newKey); err != nil {
+	if err := s.store.CreateKey(ctx, newKey); err != nil {
 		return APIKey{}, WorkloadToken{}, err
 	}
-	if err := s.store.DeleteKey(old.id); err != nil {
+	if err := s.store.DeleteKey(ctx, old.id); err != nil {
 		// Roll back the new key so we don't leave two live keys after a failed
 		// rotation; best-effort cleanup, original error is surfaced.
-		_ = s.store.DeleteKey(newKey.id)
+		_ = s.store.DeleteKey(ctx, newKey.id)
 		return APIKey{}, WorkloadToken{}, err
 	}
 	return newKey, raw, nil

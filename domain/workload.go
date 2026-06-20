@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"sort"
@@ -265,19 +266,20 @@ func APIKeyFromSnapshot(s APIKeySnapshot) APIKey {
 
 // WorkloadStore is the persistence port for workload API keys. Implementations
 // must be safe for concurrent use and must key on Hash for GetKeyByHash so the
-// hot validation path is a single lookup.
+// hot validation path is a single lookup. Every method takes a context.Context
+// first so storage I/O honors cancellation, deadlines, and trace propagation.
 type WorkloadStore interface {
 	// CreateKey inserts a new key. Implementations SHOULD reject a duplicate ID
 	// or Hash rather than silently overwrite.
-	CreateKey(k APIKey) error
+	CreateKey(ctx context.Context, k APIKey) error
 	// GetKeyByHash returns the key for a token hash or ErrNotFound.
-	GetKeyByHash(hash string) (APIKey, error)
+	GetKeyByHash(ctx context.Context, hash string) (APIKey, error)
 	// GetKey returns the key for an ID or ErrNotFound.
-	GetKey(id KeyID) (APIKey, error)
+	GetKey(ctx context.Context, id KeyID) (APIKey, error)
 	// ListKeysByWorker returns every key for a worker (any order).
-	ListKeysByWorker(workerID WorkerID) ([]APIKey, error)
+	ListKeysByWorker(ctx context.Context, workerID WorkerID) ([]APIKey, error)
 	// UpdateKey replaces an existing key by ID; ErrNotFound if absent.
-	UpdateKey(k APIKey) error
+	UpdateKey(ctx context.Context, k APIKey) error
 	// DeleteKey removes a key by ID. Deleting an absent key returns ErrNotFound.
-	DeleteKey(id KeyID) error
+	DeleteKey(ctx context.Context, id KeyID) error
 }

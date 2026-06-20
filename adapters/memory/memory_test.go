@@ -1,6 +1,7 @@
 package memory_test
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"testing"
@@ -147,12 +148,13 @@ func TestLoginAttemptRepo(t *testing.T) {
 }
 
 func TestWorkloadKeyRepo_CRUD(t *testing.T) {
+	ctx := context.Background()
 	repo := memory.NewWorkloadKeyRepo()
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
 	svc := domain.NewWorkloadKeyService(repo, func() time.Time { return now })
 
 	w := wid(t, "agent-1")
-	key, raw, err := svc.IssueKey(domain.KeyRequest{
+	key, raw, err := svc.IssueKey(ctx, domain.KeyRequest{
 		WorkerID:  w,
 		Scope:     scope(t, "tools:*"),
 		ExpiresAt: now.Add(time.Hour),
@@ -162,21 +164,21 @@ func TestWorkloadKeyRepo_CRUD(t *testing.T) {
 	}
 
 	// GetKey by ID.
-	got, err := repo.GetKey(key.ID())
+	got, err := repo.GetKey(ctx, key.ID())
 	if err != nil || got.WorkerID().String() != "agent-1" {
 		t.Fatalf("get by id: %v / %+v", err, got.Snapshot())
 	}
 	// GetKeyByHash.
-	byHash, err := repo.GetKeyByHash(domain.HashWorkloadToken(raw))
+	byHash, err := repo.GetKeyByHash(ctx, domain.HashWorkloadToken(raw))
 	if err != nil || byHash.ID() != key.ID() {
 		t.Fatalf("get by hash: %v / %+v", err, byHash.Snapshot())
 	}
 	// Duplicate CreateKey rejected.
-	if err := repo.CreateKey(key); !errors.Is(err, domain.ErrConflict) {
+	if err := repo.CreateKey(ctx, key); !errors.Is(err, domain.ErrConflict) {
 		t.Fatalf("duplicate create: want ErrConflict, got %v", err)
 	}
 	// ListKeysByWorker.
-	list, err := repo.ListKeysByWorker(w)
+	list, err := repo.ListKeysByWorker(ctx, w)
 	if err != nil || len(list) != 1 {
 		t.Fatalf("list: %v / %+v", err, list)
 	}
@@ -185,23 +187,24 @@ func TestWorkloadKeyRepo_CRUD(t *testing.T) {
 		ID: "missing", Hash: "h", WorkerID: "agent-1", Scope: []string{"a:b"},
 		ExpiresAt: now.Add(time.Hour), CreatedAt: now,
 	})
-	if err := repo.UpdateKey(unknown); !errors.Is(err, domain.ErrNotFound) {
+	if err := repo.UpdateKey(ctx, unknown); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("update unknown: want ErrNotFound, got %v", err)
 	}
 	// DeleteKey unknown.
-	if err := repo.DeleteKey(domain.KeyID("missing")); !errors.Is(err, domain.ErrNotFound) {
+	if err := repo.DeleteKey(ctx, domain.KeyID("missing")); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("delete unknown: want ErrNotFound, got %v", err)
 	}
 	// DeleteKey existing → hash index also cleared.
-	if err := repo.DeleteKey(key.ID()); err != nil {
+	if err := repo.DeleteKey(ctx, key.ID()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repo.GetKeyByHash(domain.HashWorkloadToken(raw)); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := repo.GetKeyByHash(ctx, domain.HashWorkloadToken(raw)); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("hash index not cleared on delete: %v", err)
 	}
 }
 
 func TestWorkloadKeyRepo_UpdateRekeysHashIndex(t *testing.T) {
+	ctx := context.Background()
 	repo := memory.NewWorkloadKeyRepo()
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
 
@@ -209,20 +212,20 @@ func TestWorkloadKeyRepo_UpdateRekeysHashIndex(t *testing.T) {
 		ID: "k1", Hash: "hash-a", WorkerID: "agent-1", Scope: []string{"tools:read"},
 		ExpiresAt: now.Add(time.Hour), CreatedAt: now,
 	})
-	if err := repo.CreateKey(orig); err != nil {
+	if err := repo.CreateKey(ctx, orig); err != nil {
 		t.Fatal(err)
 	}
 	updated := domain.APIKeyFromSnapshot(domain.APIKeySnapshot{
 		ID: "k1", Hash: "hash-b", WorkerID: "agent-1", Scope: []string{"tools:read"},
 		ExpiresAt: now.Add(time.Hour), CreatedAt: now,
 	})
-	if err := repo.UpdateKey(updated); err != nil {
+	if err := repo.UpdateKey(ctx, updated); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repo.GetKeyByHash("hash-a"); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := repo.GetKeyByHash(ctx, "hash-a"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("old hash still resolves: %v", err)
 	}
-	got, err := repo.GetKeyByHash("hash-b")
+	got, err := repo.GetKeyByHash(ctx, "hash-b")
 	if err != nil || got.ID() != "k1" {
 		t.Fatalf("new hash lookup: %v / %+v", err, got.Snapshot())
 	}
@@ -231,6 +234,7 @@ func TestWorkloadKeyRepo_UpdateRekeysHashIndex(t *testing.T) {
 // TestWorkloadKeyRepo_Concurrency exercises the store under concurrent issue,
 // validate, list, and revoke. Run with -race to detect data races.
 func TestWorkloadKeyRepo_Concurrency(t *testing.T) {
+	ctx := context.Background()
 	repo := memory.NewWorkloadKeyRepo()
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
 	svc := domain.NewWorkloadKeyService(repo, func() time.Time { return now })
@@ -242,7 +246,7 @@ func TestWorkloadKeyRepo_Concurrency(t *testing.T) {
 	for i := 0; i < n; i++ {
 		go func() {
 			defer wg.Done()
-			key, raw, err := svc.IssueKey(domain.KeyRequest{
+			key, raw, err := svc.IssueKey(ctx, domain.KeyRequest{
 				WorkerID:  w,
 				Scope:     scope(t, "tools:*"),
 				ExpiresAt: now.Add(time.Hour),
@@ -251,20 +255,20 @@ func TestWorkloadKeyRepo_Concurrency(t *testing.T) {
 				t.Errorf("issue: %v", err)
 				return
 			}
-			if _, err := svc.ValidateKey(raw); err != nil {
+			if _, err := svc.ValidateKey(ctx, raw); err != nil {
 				t.Errorf("validate: %v", err)
 			}
-			if _, err := svc.ListKeys(w); err != nil {
+			if _, err := svc.ListKeys(ctx, w); err != nil {
 				t.Errorf("list: %v", err)
 			}
-			if err := svc.RevokeKey(key.ID()); err != nil {
+			if err := svc.RevokeKey(ctx, key.ID()); err != nil {
 				t.Errorf("revoke: %v", err)
 			}
 		}()
 	}
 	wg.Wait()
 
-	left, _ := svc.ListKeys(w)
+	left, _ := svc.ListKeys(ctx, w)
 	if len(left) != 0 {
 		t.Fatalf("concurrent issue/revoke left keys: %d", len(left))
 	}

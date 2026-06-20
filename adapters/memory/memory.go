@@ -4,6 +4,7 @@
 package memory
 
 import (
+	"context"
 	"sync"
 
 	"github.com/klarlabs-studio/auth-go/domain"
@@ -212,7 +213,10 @@ func NewWorkloadKeyRepo() *WorkloadKeyRepo {
 }
 
 // CreateKey inserts a new key, rejecting a duplicate ID or hash.
-func (r *WorkloadKeyRepo) CreateKey(k domain.APIKey) error {
+func (r *WorkloadKeyRepo) CreateKey(ctx context.Context, k domain.APIKey) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	snap := k.Snapshot()
@@ -228,7 +232,10 @@ func (r *WorkloadKeyRepo) CreateKey(k domain.APIKey) error {
 }
 
 // GetKeyByHash returns the key for a token hash or domain.ErrNotFound.
-func (r *WorkloadKeyRepo) GetKeyByHash(hash string) (domain.APIKey, error) {
+func (r *WorkloadKeyRepo) GetKeyByHash(ctx context.Context, hash string) (domain.APIKey, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.APIKey{}, err
+	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	id, ok := r.byHash[hash]
@@ -239,7 +246,10 @@ func (r *WorkloadKeyRepo) GetKeyByHash(hash string) (domain.APIKey, error) {
 }
 
 // GetKey returns the key for an ID or domain.ErrNotFound.
-func (r *WorkloadKeyRepo) GetKey(id domain.KeyID) (domain.APIKey, error) {
+func (r *WorkloadKeyRepo) GetKey(ctx context.Context, id domain.KeyID) (domain.APIKey, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.APIKey{}, err
+	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	snap, ok := r.byID[id.String()]
@@ -250,7 +260,10 @@ func (r *WorkloadKeyRepo) GetKey(id domain.KeyID) (domain.APIKey, error) {
 }
 
 // ListKeysByWorker returns every key for a worker.
-func (r *WorkloadKeyRepo) ListKeysByWorker(workerID domain.WorkerID) ([]domain.APIKey, error) {
+func (r *WorkloadKeyRepo) ListKeysByWorker(ctx context.Context, workerID domain.WorkerID) ([]domain.APIKey, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	var out []domain.APIKey
@@ -263,7 +276,10 @@ func (r *WorkloadKeyRepo) ListKeysByWorker(workerID domain.WorkerID) ([]domain.A
 }
 
 // UpdateKey replaces an existing key by ID, keeping the hash index consistent.
-func (r *WorkloadKeyRepo) UpdateKey(k domain.APIKey) error {
+func (r *WorkloadKeyRepo) UpdateKey(ctx context.Context, k domain.APIKey) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	snap := k.Snapshot()
@@ -280,7 +296,10 @@ func (r *WorkloadKeyRepo) UpdateKey(k domain.APIKey) error {
 }
 
 // DeleteKey removes a key by ID. Deleting an absent key returns ErrNotFound.
-func (r *WorkloadKeyRepo) DeleteKey(id domain.KeyID) error {
+func (r *WorkloadKeyRepo) DeleteKey(ctx context.Context, id domain.KeyID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	snap, ok := r.byID[id.String()]
