@@ -36,3 +36,18 @@ CREATE TABLE IF NOT EXISTS authgo_login_attempts (
     locked_until  TIMESTAMPTZ,
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Scoped API keys for agent workers. Only the hex SHA-256 hash of each token is
+-- stored — the raw token is returned once at issue time and never persisted.
+-- `scope` holds canonical "resource:action" capability entries (wildcards
+-- allowed, e.g. tools:*). `hash` is UNIQUE so validation is a single indexed
+-- lookup.
+CREATE TABLE IF NOT EXISTS authgo_workload_keys (
+    id          TEXT        PRIMARY KEY,
+    hash        TEXT        NOT NULL UNIQUE,
+    worker_id   TEXT        NOT NULL,
+    scope       TEXT[]      NOT NULL DEFAULT '{}',
+    expires_at  TIMESTAMPTZ NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS authgo_workload_keys_worker_idx ON authgo_workload_keys (worker_id);
