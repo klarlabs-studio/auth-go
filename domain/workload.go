@@ -305,8 +305,6 @@ type WorkloadStore interface {
 	GetKey(ctx context.Context, id KeyID) (APIKey, error)
 	// ListKeysByWorker returns every key for a worker (any order).
 	ListKeysByWorker(ctx context.Context, workerID WorkerID) ([]APIKey, error)
-	// UpdateKey replaces an existing key by ID; ErrNotFound if absent.
-	UpdateKey(ctx context.Context, k APIKey) error
 	// DeleteKey removes a key by ID. Deleting an absent key returns ErrNotFound.
 	DeleteKey(ctx context.Context, id KeyID) error
 }

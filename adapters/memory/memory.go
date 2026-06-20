@@ -275,26 +275,6 @@ func (r *WorkloadKeyRepo) ListKeysByWorker(ctx context.Context, workerID domain.
 	return out, nil
 }
 
-// UpdateKey replaces an existing key by ID, keeping the hash index consistent.
-func (r *WorkloadKeyRepo) UpdateKey(ctx context.Context, k domain.APIKey) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	snap := k.Snapshot()
-	old, ok := r.byID[snap.ID]
-	if !ok {
-		return domain.ErrNotFound
-	}
-	if old.Hash != snap.Hash {
-		delete(r.byHash, old.Hash)
-		r.byHash[snap.Hash] = snap.ID
-	}
-	r.byID[snap.ID] = snap
-	return nil
-}
-
 // DeleteKey removes a key by ID. Deleting an absent key returns ErrNotFound.
 func (r *WorkloadKeyRepo) DeleteKey(ctx context.Context, id domain.KeyID) error {
 	if err := ctx.Err(); err != nil {

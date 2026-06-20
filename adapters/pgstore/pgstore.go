@@ -331,21 +331,6 @@ func (r *WorkloadKeyRepo) ListKeysByWorker(ctx context.Context, workerID domain.
 	return out, rows.Err()
 }
 
-// UpdateKey replaces an existing key by ID; ErrNotFound if absent.
-func (r *WorkloadKeyRepo) UpdateKey(ctx context.Context, k domain.APIKey) error {
-	snap := k.Snapshot()
-	res, err := r.db.ExecContext(ctx,
-		`UPDATE authgo_workload_keys
-		    SET hash = $2, worker_id = $3, scope = $4, expires_at = $5, created_at = $6
-		  WHERE id = $1`,
-		snap.ID, snap.Hash, snap.WorkerID, pgTextArray(snap.Scope), snap.ExpiresAt, snap.CreatedAt,
-	)
-	if err != nil {
-		return err
-	}
-	return requireOneRow(res)
-}
-
 // DeleteKey removes a key by ID. Deleting an absent key returns ErrNotFound.
 func (r *WorkloadKeyRepo) DeleteKey(ctx context.Context, id domain.KeyID) error {
 	res, err := r.db.ExecContext(ctx, `DELETE FROM authgo_workload_keys WHERE id = $1`, id.String())

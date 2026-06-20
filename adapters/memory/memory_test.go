@@ -182,14 +182,6 @@ func TestWorkloadKeyRepo_CRUD(t *testing.T) {
 	if err != nil || len(list) != 1 {
 		t.Fatalf("list: %v / %+v", err, list)
 	}
-	// UpdateKey on unknown ID.
-	unknown := domain.APIKeyFromSnapshot(domain.APIKeySnapshot{
-		ID: "missing", Hash: "h", WorkerID: "agent-1", Scope: []string{"a:b"},
-		ExpiresAt: now.Add(time.Hour), CreatedAt: now,
-	})
-	if err := repo.UpdateKey(ctx, unknown); !errors.Is(err, domain.ErrNotFound) {
-		t.Fatalf("update unknown: want ErrNotFound, got %v", err)
-	}
 	// DeleteKey unknown.
 	if err := repo.DeleteKey(ctx, domain.KeyID("missing")); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("delete unknown: want ErrNotFound, got %v", err)
@@ -200,34 +192,6 @@ func TestWorkloadKeyRepo_CRUD(t *testing.T) {
 	}
 	if _, err := repo.GetKeyByHash(ctx, domain.HashWorkloadToken(raw)); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("hash index not cleared on delete: %v", err)
-	}
-}
-
-func TestWorkloadKeyRepo_UpdateRekeysHashIndex(t *testing.T) {
-	ctx := context.Background()
-	repo := memory.NewWorkloadKeyRepo()
-	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
-
-	orig := domain.APIKeyFromSnapshot(domain.APIKeySnapshot{
-		ID: "k1", Hash: "hash-a", WorkerID: "agent-1", Scope: []string{"tools:read"},
-		ExpiresAt: now.Add(time.Hour), CreatedAt: now,
-	})
-	if err := repo.CreateKey(ctx, orig); err != nil {
-		t.Fatal(err)
-	}
-	updated := domain.APIKeyFromSnapshot(domain.APIKeySnapshot{
-		ID: "k1", Hash: "hash-b", WorkerID: "agent-1", Scope: []string{"tools:read"},
-		ExpiresAt: now.Add(time.Hour), CreatedAt: now,
-	})
-	if err := repo.UpdateKey(ctx, updated); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := repo.GetKeyByHash(ctx, "hash-a"); !errors.Is(err, domain.ErrNotFound) {
-		t.Fatalf("old hash still resolves: %v", err)
-	}
-	got, err := repo.GetKeyByHash(ctx, "hash-b")
-	if err != nil || got.ID() != "k1" {
-		t.Fatalf("new hash lookup: %v / %+v", err, got.Snapshot())
 	}
 }
 
