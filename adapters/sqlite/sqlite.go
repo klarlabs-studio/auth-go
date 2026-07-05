@@ -162,12 +162,18 @@ func (r *MagicLinkRepo) FindByHash(ctx context.Context, hash string) (domain.Mag
 }
 
 // MarkConsumed flags a link as used.
-func (r *MagicLinkRepo) MarkConsumed(ctx context.Context, hash string) error {
-	res, err := r.db.ExecContext(ctx, `UPDATE authgo_magic_links SET consumed = 1 WHERE hash = ?`, hash)
+func (r *MagicLinkRepo) MarkConsumed(ctx context.Context, hash string) (bool, error) {
+	// Atomic single-use: only flip a link that is still unconsumed, and report
+	// whether this statement was the one that flipped it.
+	res, err := r.db.ExecContext(ctx, `UPDATE authgo_magic_links SET consumed = 1 WHERE hash = ? AND consumed = 0`, hash)
 	if err != nil {
-		return err
+		return false, err
 	}
-	return requireOneRow(res)
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // TOTPRepo is a SQLite domain.TOTPRepository. The base32 secret is stored

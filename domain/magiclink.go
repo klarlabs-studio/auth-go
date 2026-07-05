@@ -86,5 +86,10 @@ func MagicLinkFromSnapshot(s MagicLinkSnapshot) MagicLink {
 type MagicLinkRepository interface {
 	Save(ctx context.Context, m MagicLink) error
 	FindByHash(ctx context.Context, hash string) (MagicLink, error)
-	MarkConsumed(ctx context.Context, hash string) error
+	// MarkConsumed atomically flips the link to consumed and reports whether THIS
+	// call performed the flip (true) versus finding it already consumed or absent
+	// (false). The atomic check-and-set (e.g. UPDATE … WHERE consumed = 0) is what
+	// makes the single-use guarantee hold under concurrent redemption — the
+	// FindByHash/read-consumed check in the service alone cannot.
+	MarkConsumed(ctx context.Context, hash string) (bool, error)
 }

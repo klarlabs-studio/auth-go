@@ -154,19 +154,20 @@ func (r *MagicLinkRepo) FindByHash(ctx context.Context, hash string) (domain.Mag
 }
 
 // MarkConsumed flags a link as used.
-func (r *MagicLinkRepo) MarkConsumed(ctx context.Context, hash string) error {
+func (r *MagicLinkRepo) MarkConsumed(ctx context.Context, hash string) (bool, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return false, err
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	snap, ok := r.m[hash]
-	if !ok {
-		return domain.ErrNotFound
+	if !ok || snap.Consumed {
+		// Absent or already consumed — this call did not perform the flip.
+		return false, nil
 	}
 	snap.Consumed = true
 	r.m[hash] = snap
-	return nil
+	return true, nil
 }
 
 // TOTPRepo is an in-memory domain.TOTPRepository.

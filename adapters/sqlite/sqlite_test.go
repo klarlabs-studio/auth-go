@@ -210,9 +210,9 @@ func TestMagicLinkRepo(t *testing.T) {
 	if _, err := svc.Consume(ctx, raw); !errors.Is(err, domain.ErrConsumed) {
 		t.Fatalf("reuse: want ErrConsumed, got %v", err)
 	}
-	// MarkConsumed on unknown → ErrNotFound
-	if err := repo.MarkConsumed(ctx, "does-not-exist"); !errors.Is(err, domain.ErrNotFound) {
-		t.Fatalf("mark unknown: want ErrNotFound, got %v", err)
+	// MarkConsumed on unknown → (false, nil): nothing to flip, not an error.
+	if ok, err := repo.MarkConsumed(ctx, "does-not-exist"); ok || err != nil {
+		t.Fatalf("mark unknown: want (false, nil), got (%v, %v)", ok, err)
 	}
 }
 
