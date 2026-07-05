@@ -173,13 +173,14 @@ func (r *MagicLinkRepo) MarkConsumed(ctx context.Context, hash string) (bool, er
 
 // TOTPRepo is an in-memory domain.TOTPRepository.
 type TOTPRepo struct {
-	mu sync.RWMutex
-	m  map[string]string // userID -> base32 secret
+	mu    sync.RWMutex
+	m     map[string]string // userID -> base32 secret
+	steps map[string]int64  // userID -> last consumed TOTP step
 }
 
 // NewTOTPRepo returns an empty TOTP secret repository.
 func NewTOTPRepo() *TOTPRepo {
-	return &TOTPRepo{m: make(map[string]string)}
+	return &TOTPRepo{m: make(map[string]string), steps: make(map[string]int64)}
 }
 
 // GetSecret returns the user's secret or domain.ErrNotFound.
@@ -219,7 +220,23 @@ func (r *TOTPRepo) DeleteSecret(ctx context.Context, userID domain.UserID) error
 		return domain.ErrNotFound
 	}
 	delete(r.m, userID.String())
+	delete(r.steps, userID.String())
 	return nil
+}
+
+// ConsumeStep implements domain.AtomicTOTPConsumer: record step as used,
+// accepting it only if it advances past the user's last consumed step.
+func (r *TOTPRepo) ConsumeStep(ctx context.Context, userID domain.UserID, step int64) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if last, ok := r.steps[userID.String()]; ok && step <= last {
+		return false, nil
+	}
+	r.steps[userID.String()] = step
+	return true, nil
 }
 
 // PasskeyRepo is an in-memory domain.PasskeyRepository.

@@ -329,6 +329,37 @@ func TestTOTPRepo(t *testing.T) {
 	}
 }
 
+// TestTOTPRepo_ConsumeStep exercises the AtomicTOTPConsumer UPSERT directly: a
+// step is accepted once, replays (same or older step) are rejected, and only a
+// strictly-advancing step is consumed again.
+func TestTOTPRepo_ConsumeStep(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	repo := sqlite.NewTOTPRepo(db)
+	u := uid(t, "u1")
+
+	cases := []struct {
+		step int64
+		want bool
+		desc string
+	}{
+		{100, true, "first consume"},
+		{100, false, "same step replay"},
+		{99, false, "older step replay"},
+		{101, true, "advancing step"},
+		{101, false, "advanced step replay"},
+	}
+	for _, c := range cases {
+		fresh, err := repo.ConsumeStep(ctx, u, c.step)
+		if err != nil {
+			t.Fatalf("%s: %v", c.desc, err)
+		}
+		if fresh != c.want {
+			t.Fatalf("%s: fresh=%v, want %v", c.desc, fresh, c.want)
+		}
+	}
+}
+
 func TestPasskeyRepo(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)

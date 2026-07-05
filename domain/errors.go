@@ -16,6 +16,7 @@ var (
 	// Credential errors.
 	ErrPasswordMismatch = errors.New("authgo: password mismatch")
 	ErrInvalidTOTP      = errors.New("authgo: invalid TOTP code")
+	ErrTOTPReused       = errors.New("authgo: TOTP code already used")
 
 	// Lockout errors.
 	ErrAccountLocked     = errors.New("authgo: account locked")

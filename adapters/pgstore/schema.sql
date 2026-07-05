@@ -36,6 +36,12 @@ CREATE TABLE IF NOT EXISTS authgo_totp_secrets (
     secret      TEXT        NOT NULL
 );
 
+-- Last consumed TOTP time step per user, for single-use enforcement (RFC 6238 §5.2).
+CREATE TABLE IF NOT EXISTS authgo_totp_used_steps (
+    user_id     TEXT        PRIMARY KEY,
+    last_step   BIGINT      NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS authgo_passkeys (
     id          BYTEA       PRIMARY KEY,
     user_id     TEXT        NOT NULL,
