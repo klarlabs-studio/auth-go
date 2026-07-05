@@ -12,6 +12,7 @@ package memory
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/klarlabs-studio/auth-go/domain"
 )
@@ -330,6 +331,33 @@ func (r *LoginAttemptRepo) Delete(ctx context.Context, key string) error {
 	defer r.mu.Unlock()
 	delete(r.m, key)
 	return nil
+}
+
+// RecordFailureAtomically implements domain.AtomicLoginAttemptStore: the whole
+// read-modify-write runs under the store mutex, so concurrent failures for one
+// key can't lose increments.
+func (r *LoginAttemptRepo) RecordFailureAtomically(ctx context.Context, key string, now time.Time, maxFailures int, window time.Duration) (domain.LoginAttemptSnapshot, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.LoginAttemptSnapshot{}, false, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	snap := r.m[key]
+	snap.Key = key
+	// A previously-expired lock starts a fresh count.
+	if !snap.LockedUntil.IsZero() && !now.Before(snap.LockedUntil) {
+		snap.FailureCount = 0
+		snap.LockedUntil = time.Time{}
+	}
+	snap.FailureCount++
+	// Engage the lock the moment the threshold is reached; don't re-extend an
+	// already-active one.
+	if snap.FailureCount >= maxFailures && snap.LockedUntil.IsZero() {
+		snap.LockedUntil = now.Add(window)
+	}
+	r.m[key] = snap
+	justLocked := !snap.LockedUntil.IsZero() && snap.FailureCount == maxFailures
+	return snap, justLocked, nil
 }
 
 // WorkloadKeyRepo is an in-memory domain.WorkloadStore. It indexes keys by both

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/klarlabs-studio/auth-go/domain"
 )
@@ -337,6 +338,46 @@ func (r *LoginAttemptRepo) Save(ctx context.Context, s domain.LoginAttemptSnapsh
 func (r *LoginAttemptRepo) Delete(ctx context.Context, key string) error {
 	_, err := r.db.ExecContext(ctx, `DELETE FROM authgo_login_attempts WHERE key = ?`, key)
 	return err
+}
+
+// RecordFailureAtomically implements domain.AtomicLoginAttemptStore in a single
+// conditional UPSERT: failure_count + 1 is evaluated in SQL, so concurrent
+// failures for one key can't lose increments the way a Get→Save pair can.
+// locked_until is an RFC3339Nano string; the values compared here differ by the
+// lock window, so lexical ordering matches chronological ordering.
+func (r *LoginAttemptRepo) RecordFailureAtomically(ctx context.Context, key string, now time.Time, maxFailures int, window time.Duration) (domain.LoginAttemptSnapshot, bool, error) {
+	nowS := encodeTime(now)
+	lockS := encodeTime(now.Add(window))
+	var (
+		snap  domain.LoginAttemptSnapshot
+		until sql.NullString
+	)
+	err := r.db.QueryRowContext(ctx,
+		`INSERT INTO authgo_login_attempts (key, failure_count, locked_until, updated_at)
+		 VALUES (?, 1, CASE WHEN 1 >= ? THEN ? ELSE NULL END, ?)
+		 ON CONFLICT (key) DO UPDATE SET
+		   failure_count = CASE
+		     WHEN locked_until IS NOT NULL AND locked_until <= ? THEN 1
+		     ELSE failure_count + 1 END,
+		   locked_until = CASE
+		     WHEN locked_until IS NOT NULL AND locked_until > ? THEN locked_until
+		     WHEN (CASE WHEN locked_until IS NOT NULL AND locked_until <= ? THEN 1 ELSE failure_count + 1 END) >= ? THEN ?
+		     ELSE NULL END,
+		   updated_at = ?
+		 RETURNING failure_count, locked_until`,
+		key, maxFailures, lockS, nowS, nowS, nowS, nowS, maxFailures, lockS, nowS,
+	).Scan(&snap.FailureCount, &until)
+	if err != nil {
+		return domain.LoginAttemptSnapshot{}, false, err
+	}
+	snap.Key = key
+	if until.Valid {
+		if snap.LockedUntil, err = decodeTime(until.String); err != nil {
+			return domain.LoginAttemptSnapshot{}, false, err
+		}
+	}
+	justLocked := !snap.LockedUntil.IsZero() && snap.FailureCount == maxFailures
+	return snap, justLocked, nil
 }
 
 // WorkloadKeyRepo is a SQLite domain.WorkloadStore. Only the hex SHA-256 hash of
