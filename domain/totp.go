@@ -70,6 +70,63 @@ type TOTPRepository interface {
 	DeleteSecret(ctx context.Context, userID UserID) error
 }
 
+// AtomicTOTPConsumer is an optional TOTPRepository capability enabling single-use
+// codes: it records the last successfully consumed time step per user and reports
+// whether a step is fresh. Without it a valid code is replayable within its ±Skew
+// window (RFC 6238 §5.2). TOTPService uses it when the repository provides it.
+type AtomicTOTPConsumer interface {
+	// ConsumeStep atomically records step as userID's last-consumed step and
+	// returns true if it was fresh (strictly greater than the previous), false on
+	// a replay (step <= the last consumed).
+	ConsumeStep(ctx context.Context, userID UserID, step int64) (bool, error)
+}
+
+// TOTPService verifies a user's TOTP codes with replay protection. It loads the
+// enrolled secret, validates the code, and — when the repository implements
+// AtomicTOTPConsumer — atomically consumes the matched time step so a code can't
+// be reused within its ±Skew window (RFC 6238 §5.2).
+type TOTPService struct {
+	repo TOTPRepository
+	cfg  TOTPConfig
+	now  Clock
+}
+
+// NewTOTPService builds the service. A nil clock uses the wall clock.
+func NewTOTPService(repo TOTPRepository, cfg TOTPConfig, clock Clock) *TOTPService {
+	return &TOTPService{repo: repo, cfg: cfg, now: orSystemClock(clock)}
+}
+
+// Verify checks code against userID's enrolled secret. It returns ErrNotFound if
+// the user has no secret, ErrInvalidTOTP if the code doesn't match any step in
+// the window, and ErrTOTPReused if the code is valid but its step was already
+// consumed. On success the matched step is consumed so the same code cannot be
+// used again.
+func (s *TOTPService) Verify(ctx context.Context, userID UserID, code string) error {
+	secret, err := s.repo.GetSecret(ctx, userID)
+	if err != nil {
+		return err
+	}
+	step, err := s.cfg.validateStep(secret, code, s.now())
+	if err != nil {
+		return err
+	}
+	consumer, ok := s.repo.(AtomicTOTPConsumer)
+	if !ok {
+		// The store can't record consumed steps, so the code validates but stays
+		// replayable within its window. Back TOTPService with a repository that
+		// implements AtomicTOTPConsumer for single-use enforcement.
+		return nil
+	}
+	fresh, err := consumer.ConsumeStep(ctx, userID, step)
+	if err != nil {
+		return err
+	}
+	if !fresh {
+		return ErrTOTPReused
+	}
+	return nil
+}
+
 // TOTPConfig parameterizes the OTP algorithm (RFC 6238 defaults).
 type TOTPConfig struct {
 	Period uint   // seconds per step (default 30)
@@ -116,19 +173,29 @@ func (c TOTPConfig) Generate(secret TOTPSecret, t time.Time) (string, error) {
 }
 
 // Validate checks a code against the secret at time t, allowing ±Skew steps.
+// It is stateless — a code stays valid for its whole ±Skew window. For
+// replay-safe verification (RFC 6238 §5.2) use TOTPService, which consumes the
+// matched step so a code can't be reused.
 func (c TOTPConfig) Validate(secret TOTPSecret, code string, t time.Time) error {
+	_, err := c.validateStep(secret, code, t)
+	return err
+}
+
+// validateStep is Validate but returns the matched time step, so the step can be
+// recorded as consumed to prevent replay.
+func (c TOTPConfig) validateStep(secret TOTPSecret, code string, t time.Time) (int64, error) {
 	counter := int64(uint64(t.Unix()) / uint64(c.period()))
 	skew := int64(c.Skew)
 	for i := -skew; i <= skew; i++ {
 		want, err := c.hotp(secret, uint64(counter+i))
 		if err != nil {
-			return err
+			return 0, err
 		}
 		if subtle.ConstantTimeCompare([]byte(want), []byte(code)) == 1 {
-			return nil
+			return counter + i, nil
 		}
 	}
-	return ErrInvalidTOTP
+	return 0, ErrInvalidTOTP
 }
 
 func (c TOTPConfig) hotp(secret TOTPSecret, counter uint64) (string, error) {

@@ -201,6 +201,26 @@ func (r *TOTPRepo) DeleteSecret(ctx context.Context, userID domain.UserID) error
 	return requireOneRow(res)
 }
 
+// ConsumeStep implements domain.AtomicTOTPConsumer: atomically record step as
+// used, accepting it only if it advances past the last consumed step. A single
+// conditional UPSERT, so concurrent verifications can't both consume one step.
+func (r *TOTPRepo) ConsumeStep(ctx context.Context, userID domain.UserID, step int64) (bool, error) {
+	res, err := r.db.ExecContext(ctx,
+		`INSERT INTO authgo_totp_used_steps (user_id, last_step) VALUES ($1, $2)
+		 ON CONFLICT (user_id) DO UPDATE SET last_step = EXCLUDED.last_step
+		   WHERE authgo_totp_used_steps.last_step < EXCLUDED.last_step`,
+		userID.String(), step,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // PasskeyRepo is a Postgres domain.PasskeyRepository.
 type PasskeyRepo struct{ db DB }
 

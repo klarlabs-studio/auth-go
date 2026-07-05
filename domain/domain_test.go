@@ -260,6 +260,88 @@ func TestTOTP_SecretValidationAndURI(t *testing.T) {
 	}
 }
 
+func TestTOTPService_Verify(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 6, 8, 12, 0, 30, 0, time.UTC)
+	repo := memory.NewTOTPRepo()
+	cfg := domain.DefaultTOTPConfig("Klarlabs")
+	uid := mustUserID(t, "u1")
+
+	secret, _ := domain.NewTOTPSecret()
+	if err := repo.SetSecret(ctx, uid, secret); err != nil {
+		t.Fatal(err)
+	}
+	code, _ := cfg.Generate(secret, now)
+	svc := domain.NewTOTPService(repo, cfg, fixedClock(&now))
+
+	// First use of a valid code succeeds.
+	if err := svc.Verify(ctx, uid, code); err != nil {
+		t.Fatalf("first verify: %v", err)
+	}
+	// Replaying the same code within its window is rejected (RFC 6238 §5.2).
+	if err := svc.Verify(ctx, uid, code); !errors.Is(err, domain.ErrTOTPReused) {
+		t.Fatalf("replay: want ErrTOTPReused, got %v", err)
+	}
+	// A wrong code is ErrInvalidTOTP, not ErrTOTPReused.
+	if err := svc.Verify(ctx, uid, "000000"); !errors.Is(err, domain.ErrInvalidTOTP) {
+		t.Fatalf("wrong code: want ErrInvalidTOTP, got %v", err)
+	}
+	// An unenrolled user is ErrNotFound.
+	if err := svc.Verify(ctx, mustUserID(t, "u2"), code); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("unenrolled: want ErrNotFound, got %v", err)
+	}
+
+	// A fresh code from the next step is still accepted after the earlier one
+	// was consumed — consumption gates on the step, not the whole secret.
+	later := now.Add(30 * time.Second)
+	next, _ := cfg.Generate(secret, later)
+	svcLater := domain.NewTOTPService(repo, cfg, fixedClock(&later))
+	if err := svcLater.Verify(ctx, uid, next); err != nil {
+		t.Fatalf("next step: %v", err)
+	}
+}
+
+func TestTOTPService_ConsumeIsSingleUseUnderConcurrency(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 6, 8, 12, 0, 30, 0, time.UTC)
+	repo := memory.NewTOTPRepo()
+	cfg := domain.DefaultTOTPConfig("Klarlabs")
+	uid := mustUserID(t, "u1")
+
+	secret, _ := domain.NewTOTPSecret()
+	if err := repo.SetSecret(ctx, uid, secret); err != nil {
+		t.Fatal(err)
+	}
+	code, _ := cfg.Generate(secret, now)
+	svc := domain.NewTOTPService(repo, cfg, fixedClock(&now))
+
+	const n = 20
+	var wg sync.WaitGroup
+	var ok, reused int64
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			switch err := svc.Verify(ctx, uid, code); {
+			case err == nil:
+				atomic.AddInt64(&ok, 1)
+			case errors.Is(err, domain.ErrTOTPReused):
+				atomic.AddInt64(&reused, 1)
+			default:
+				t.Errorf("unexpected error: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if ok != 1 {
+		t.Fatalf("exactly one Verify should succeed, got %d", ok)
+	}
+	if reused != n-1 {
+		t.Fatalf("the other %d should be ErrTOTPReused, got %d", n-1, reused)
+	}
+}
+
 // ── Session service ─────────────────────────────────────────
 
 func TestSessionService_Lifecycle(t *testing.T) {
