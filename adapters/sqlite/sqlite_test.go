@@ -2,13 +2,16 @@ package sqlite_test
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/klarlabs-studio/auth-go/adapters/sqlite"
+	"github.com/klarlabs-studio/auth-go/aesgcm"
 	"github.com/klarlabs-studio/auth-go/domain"
 )
 
@@ -367,6 +370,59 @@ func TestTOTPRepo_ConsumeStep(t *testing.T) {
 		if fresh != c.want {
 			t.Fatalf("%s: fresh=%v, want %v", c.desc, fresh, c.want)
 		}
+	}
+}
+
+// TestTOTPRepo_WithCipher proves the WithCipher option encrypts the secret at
+// rest: the stored column is neither the base32 secret nor readable, yet
+// GetSecret round-trips it back through the cipher.
+func TestTOTPRepo_WithCipher(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	u := uid(t, "u1")
+
+	key := make([]byte, aesgcm.KeySize)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatal(err)
+	}
+	cipher, err := aesgcm.New(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := sqlite.NewTOTPRepo(db, sqlite.WithCipher(cipher))
+
+	secret, err := domain.NewTOTPSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SetSecret(ctx, u, secret); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+
+	// The raw column must not hold the base32 secret.
+	var stored string
+	if err := db.QueryRowContext(ctx,
+		`SELECT secret FROM authgo_totp_secrets WHERE user_id = ?`, u.String(),
+	).Scan(&stored); err != nil {
+		t.Fatalf("read column: %v", err)
+	}
+	if strings.Contains(stored, secret.String()) {
+		t.Fatal("secret stored in plaintext despite WithCipher")
+	}
+
+	// GetSecret decrypts back to the original.
+	got, err := repo.GetSecret(ctx, u)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.String() != secret.String() {
+		t.Fatalf("round-trip mismatch: %q vs %q", got.String(), secret.String())
+	}
+
+	// A repo without the cipher can't read an encrypted secret back as valid.
+	plainRepo := sqlite.NewTOTPRepo(db)
+	if got, err := plainRepo.GetSecret(ctx, u); err == nil && got.String() == secret.String() {
+		t.Fatal("plaintext repo recovered an encrypted secret")
 	}
 }
 
