@@ -59,6 +59,14 @@ type CookieOptions struct {
 	// production, as it allows the session cookie to travel over plain HTTP.
 	Insecure bool
 	// SameSite controls cross-site sending. Default http.SameSiteLaxMode.
+	//
+	// SameSite=Lax is a CSRF mitigation, not a complete defense: it stops the
+	// cookie riding cross-site POST/PUT/DELETE, but same-site sub-resources and
+	// top-level GET navigations still carry it. For state-changing endpoints,
+	// pair this cookie with an application-layer anti-CSRF control — a
+	// double-submit or synchronizer token, or an Origin/Sec-Fetch-Site check.
+	// Use http.SameSiteStrictMode when no legitimate cross-site navigation needs
+	// the session (it breaks inbound links that must land authenticated).
 	SameSite http.SameSite
 }
 

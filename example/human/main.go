@@ -30,7 +30,7 @@ func main() {
 	u, err := domain.NewUser(uid, tid, emailVO, time.Now(), time.Now())
 	must(err)
 	must(users.UpsertUser(ctx, u))
-	got, err := users.GetUser(ctx, uid)
+	got, err := users.GetUser(ctx, tid, uid)
 	must(err)
 	fmt.Printf("user: %s <%s> in tenant %s\n", got.ID(), got.Email(), got.TenantID())
 

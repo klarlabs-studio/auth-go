@@ -103,8 +103,13 @@ func UserFromSnapshot(s UserSnapshot) User {
 // takes a context.Context first so storage I/O honors cancellation, deadlines,
 // and trace propagation.
 type UserRepository interface {
-	// GetUser returns the user for an ID or ErrNotFound.
-	GetUser(ctx context.Context, id UserID) (User, error)
-	// UpsertUser inserts or updates a user, keyed on its ID.
+	// GetUser returns the user with id within tenantID, or ErrNotFound. The
+	// lookup is scoped to the tenant so a UserID belonging to another tenant is
+	// never resolved across the boundary even though IDs are globally unique —
+	// defense in depth alongside (not a replacement for) database Row-Level
+	// Security. A user that exists under a different tenant reads as ErrNotFound.
+	GetUser(ctx context.Context, tenantID TenantID, id UserID) (User, error)
+	// UpsertUser inserts or updates a user, keyed on its ID. The tenant is taken
+	// from the User aggregate, which carries its own validated TenantID.
 	UpsertUser(ctx context.Context, u User) error
 }

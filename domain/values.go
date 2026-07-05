@@ -13,12 +13,25 @@ import (
 	"strings"
 )
 
+// Length bounds for the value objects. Every constructor caps its input so a
+// single over-long field can't be used to force outsized allocations, hashing,
+// or storage — an unauthenticated caller controls the email and (via a cookie)
+// the token, so the bound is a cheap denial-of-service floor, not a business
+// rule. The caps are deliberately generous: real identifiers, addresses, and
+// tokens sit far below them.
+const (
+	maxUserIDLen   = 255  // product-chosen key (UUID/ULID/external id)
+	maxTenantIDLen = 255  // product-chosen key
+	maxEmailLen    = 254  // RFC 5321 §4.5.3.1.3 maximum path length
+	maxTokenLen    = 4096 // >> a 43-char base64 token; a browser cookie cap
+)
+
 // UserID identifies a user within a tenant. Opaque, non-empty.
 type UserID struct{ v string }
 
 // NewUserID validates and constructs a UserID.
 func NewUserID(s string) (UserID, error) {
-	if strings.TrimSpace(s) == "" {
+	if strings.TrimSpace(s) == "" || len(s) > maxUserIDLen {
 		return UserID{}, ErrInvalidUserID
 	}
 	return UserID{v: s}, nil
@@ -35,7 +48,7 @@ type TenantID struct{ v string }
 
 // NewTenantID validates and constructs a TenantID.
 func NewTenantID(s string) (TenantID, error) {
-	if strings.TrimSpace(s) == "" {
+	if strings.TrimSpace(s) == "" || len(s) > maxTenantIDLen {
 		return TenantID{}, ErrInvalidTenantID
 	}
 	return TenantID{v: s}, nil
@@ -54,8 +67,9 @@ type Email struct{ v string }
 func NewEmail(s string) (Email, error) {
 	s = strings.TrimSpace(strings.ToLower(s))
 	at := strings.IndexByte(s, '@')
-	// require a local part, an '@', and a dot in the domain part
-	if at <= 0 || at == len(s)-1 || !strings.Contains(s[at+1:], ".") {
+	// require a local part, an '@', a dot in the domain part, and a length within
+	// the RFC 5321 maximum (rejects an over-long address before it is stored).
+	if at <= 0 || at == len(s)-1 || len(s) > maxEmailLen || !strings.Contains(s[at+1:], ".") {
 		return Email{}, ErrInvalidEmail
 	}
 	return Email{v: s}, nil
@@ -80,9 +94,12 @@ func NewToken() (Token, error) {
 	return Token{v: base64.RawURLEncoding.EncodeToString(b)}, nil
 }
 
-// TokenFromString wraps an existing token string (e.g. from a cookie).
+// TokenFromString wraps an existing token string (e.g. from a cookie). It
+// rejects the empty string and any value past maxTokenLen — the raw token is
+// attacker-controlled (it arrives in a cookie or URL), so an unbounded value
+// would otherwise be hashed and looked up verbatim.
 func TokenFromString(s string) (Token, error) {
-	if s == "" {
+	if s == "" || len(s) > maxTokenLen {
 		return Token{}, ErrInvalidToken
 	}
 	return Token{v: s}, nil

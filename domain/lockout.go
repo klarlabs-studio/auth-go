@@ -98,6 +98,13 @@ type AtomicLoginAttemptStore interface {
 //
 // Store errors are surfaced to the caller rather than swallowed: the library
 // stays honest and the product decides its fail-open vs fail-closed posture.
+//
+// DoS trade-off: keying on the account (email) means an attacker who knows a
+// victim's address can lock them out on purpose by burning failures. That is
+// the accepted cost of per-account lockout; it is not an oversight. Mitigate at
+// the product edge by ALSO throttling on a network identity (client IP or ASN)
+// so one source cannot drive another account's counter, and prefer a lock that
+// expires (Window) over a permanent one so a targeted victim self-recovers.
 type LockoutService struct {
 	store  LoginAttemptStore
 	policy LockoutPolicy

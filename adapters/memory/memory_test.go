@@ -70,7 +70,7 @@ func TestUserRepo(t *testing.T) {
 	repo := memory.NewUserRepo()
 	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
 
-	if _, err := repo.GetUser(ctx, uid(t, "u1")); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := repo.GetUser(ctx, tid(t, "t1"), uid(t, "u1")); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("missing user: want ErrNotFound, got %v", err)
 	}
 
@@ -78,7 +78,7 @@ func TestUserRepo(t *testing.T) {
 	if err := repo.UpsertUser(ctx, u); err != nil {
 		t.Fatal(err)
 	}
-	got, err := repo.GetUser(ctx, uid(t, "u1"))
+	got, err := repo.GetUser(ctx, tid(t, "t1"), uid(t, "u1"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,12 +86,18 @@ func TestUserRepo(t *testing.T) {
 		t.Fatalf("get mismatch: %+v", got.Snapshot())
 	}
 
+	// The lookup is tenant-scoped: the same ID under a different tenant is not
+	// resolved across the boundary.
+	if _, err := repo.GetUser(ctx, tid(t, "t2"), uid(t, "u1")); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("cross-tenant: want ErrNotFound, got %v", err)
+	}
+
 	// Upsert updates in place (same ID).
 	updated := mustUser(t, "u1", "t1", "c@d.com", now.Add(time.Hour))
 	if err := repo.UpsertUser(ctx, updated); err != nil {
 		t.Fatal(err)
 	}
-	got, _ = repo.GetUser(ctx, uid(t, "u1"))
+	got, _ = repo.GetUser(ctx, tid(t, "t1"), uid(t, "u1"))
 	if got.Email().String() != "c@d.com" {
 		t.Fatalf("upsert did not update: %+v", got.Snapshot())
 	}
@@ -177,6 +183,37 @@ func TestPasskeyRepo(t *testing.T) {
 	final, _ := repo.ListByUser(ctx, u)
 	if len(final) != 0 {
 		t.Fatal("delete failed")
+	}
+}
+
+// TestPasskeyRepo_NoAliasing proves the store copies credential byte slices, so
+// neither the caller's Add buffer nor a returned ListByUser slice aliases the
+// stored credential — mutating either must not corrupt what the store holds.
+func TestPasskeyRepo_NoAliasing(t *testing.T) {
+	ctx := context.Background()
+	repo := memory.NewPasskeyRepo()
+	u := uid(t, "u1")
+
+	id := []byte{1, 2, 3}
+	pub := []byte{9, 9, 9}
+	if err := repo.Add(ctx, domain.PasskeyCredential{ID: id, UserID: u, PublicKey: pub}); err != nil {
+		t.Fatal(err)
+	}
+	// Mutating the buffers passed to Add must not reach the stored copy.
+	id[0], pub[0] = 0xFF, 0xFF
+
+	got, _ := repo.ListByUser(ctx, u)
+	if len(got) != 1 {
+		t.Fatalf("list: %+v", got)
+	}
+	if got[0].ID[0] != 1 || got[0].PublicKey[0] != 9 {
+		t.Fatalf("Add aliased caller buffers: %+v", got[0])
+	}
+	// Mutating a returned slice must not reach the stored copy either.
+	got[0].PublicKey[0] = 0x00
+	again, _ := repo.ListByUser(ctx, u)
+	if again[0].PublicKey[0] != 9 {
+		t.Fatalf("ListByUser aliased stored buffer: %+v", again[0])
 	}
 }
 

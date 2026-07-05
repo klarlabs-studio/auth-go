@@ -71,7 +71,7 @@ func TestUserRepo(t *testing.T) {
 	repo := sqlite.NewUserRepo(db)
 	now := time.Now().UTC().Truncate(time.Second)
 
-	if _, err := repo.GetUser(ctx, uid(t, "u1")); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := repo.GetUser(ctx, tid(t), uid(t, "u1")); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("missing user: want ErrNotFound, got %v", err)
 	}
 
@@ -82,7 +82,7 @@ func TestUserRepo(t *testing.T) {
 	if err := repo.UpsertUser(ctx, u); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
-	got, err := repo.GetUser(ctx, uid(t, "u1"))
+	got, err := repo.GetUser(ctx, tid(t), uid(t, "u1"))
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -91,6 +91,16 @@ func TestUserRepo(t *testing.T) {
 	}
 	if !got.CreatedAt().Equal(now) || !got.UpdatedAt().Equal(now) {
 		t.Fatalf("timestamps not round-tripped: %+v", got.Snapshot())
+	}
+
+	// The lookup is tenant-scoped: the same ID under a different tenant is not
+	// resolved across the boundary.
+	otherTenant, err := domain.NewTenantID("t2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.GetUser(ctx, otherTenant, uid(t, "u1")); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("cross-tenant: want ErrNotFound, got %v", err)
 	}
 
 	// Upsert updates in place.
@@ -106,7 +116,7 @@ func TestUserRepo(t *testing.T) {
 	if err := repo.UpsertUser(ctx, u2); err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	got, _ = repo.GetUser(ctx, uid(t, "u1"))
+	got, _ = repo.GetUser(ctx, tid(t), uid(t, "u1"))
 	if got.Email().String() != "c@d.co" || !got.UpdatedAt().Equal(later) {
 		t.Fatalf("upsert did not update: %+v", got.Snapshot())
 	}
