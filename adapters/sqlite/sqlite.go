@@ -25,15 +25,17 @@ type UserRepo struct{ db DB }
 // NewUserRepo builds a user repository over db.
 func NewUserRepo(db DB) *UserRepo { return &UserRepo{db: db} }
 
-// GetUser loads a user or returns domain.ErrNotFound.
-func (r *UserRepo) GetUser(ctx context.Context, id domain.UserID) (domain.User, error) {
+// GetUser loads the user with id within tenantID, or domain.ErrNotFound. The
+// tenant is part of the predicate, so a user under another tenant reads as
+// ErrNotFound.
+func (r *UserRepo) GetUser(ctx context.Context, tenantID domain.TenantID, id domain.UserID) (domain.User, error) {
 	var (
 		snap                 domain.UserSnapshot
 		createdAt, updatedAt string
 	)
 	err := r.db.QueryRowContext(ctx,
 		`SELECT id, tenant_id, email, created_at, updated_at
-		 FROM authgo_users WHERE id = ?`, id.String(),
+		 FROM authgo_users WHERE id = ? AND tenant_id = ?`, id.String(), tenantID.String(),
 	).Scan(&snap.ID, &snap.TenantID, &snap.Email, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.User{}, domain.ErrNotFound

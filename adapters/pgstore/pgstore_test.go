@@ -76,7 +76,7 @@ func TestUserRepo_Integration(t *testing.T) {
 	repo := pgstore.NewUserRepo(db)
 	now := time.Now().UTC().Truncate(time.Microsecond)
 
-	if _, err := repo.GetUser(ctx, uid(t, "user-pg")); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := repo.GetUser(ctx, tid(t, "tenant-pg"), uid(t, "user-pg")); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("missing user: want ErrNotFound, got %v", err)
 	}
 
@@ -88,12 +88,18 @@ func TestUserRepo_Integration(t *testing.T) {
 	if err := repo.UpsertUser(ctx, u); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
-	got, err := repo.GetUser(ctx, uid(t, "user-pg"))
+	got, err := repo.GetUser(ctx, tid(t, "tenant-pg"), uid(t, "user-pg"))
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
 	if got.Email().String() != "felix@klarlabs.de" || got.TenantID().String() != "tenant-pg" {
 		t.Fatalf("roundtrip mismatch: %+v", got.Snapshot())
+	}
+
+	// The lookup is tenant-scoped: the same ID under a different tenant is not
+	// resolved across the boundary.
+	if _, err := repo.GetUser(ctx, tid(t, "other-pg"), uid(t, "user-pg")); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("cross-tenant: want ErrNotFound, got %v", err)
 	}
 
 	// Upsert updates in place.
@@ -103,7 +109,7 @@ func TestUserRepo_Integration(t *testing.T) {
 	if err := repo.UpsertUser(ctx, u2); err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	got, _ = repo.GetUser(ctx, uid(t, "user-pg"))
+	got, _ = repo.GetUser(ctx, tid(t, "tenant-pg"), uid(t, "user-pg"))
 	if got.Email().String() != "new@klarlabs.de" || !got.UpdatedAt().Equal(later) {
 		t.Fatalf("upsert did not update: %+v", got.Snapshot())
 	}

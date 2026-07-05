@@ -128,6 +128,32 @@ http.Handle("/ui/", mw.Middleware(uiHandler))
 // downstream: sess, _ := middleware.SessionFromContext(r.Context())
 ```
 
+## Security posture
+
+What the library guarantees, and where the deployment must meet it halfway:
+
+- **Secrets at rest.** Session tokens, magic links, and workload keys are stored
+  as SHA-256 hashes; passwords as argon2id. Only the TOTP shared secret is stored
+  recoverable (HOTP needs the raw secret to verify a code) — protect that column
+  with database column encryption or a protected schema.
+- **Tenant isolation.** `UserRepository.GetUser` is tenant-scoped: a `UserID`
+  belonging to another tenant reads as `ErrNotFound` even though IDs are globally
+  unique. This is defense in depth *alongside*, not instead of, database
+  Row-Level Security — enable RLS on the Postgres tables (`tenant_id` derived
+  server-side, never from the client).
+- **CSRF.** The session cookie defaults to `SameSite=Lax` + `HttpOnly` +
+  `Secure`. `Lax` blocks cross-site state-changing requests but is not a complete
+  defense; pair state-changing endpoints with an app-layer anti-CSRF token or an
+  `Origin`/`Sec-Fetch-Site` check. Use `SameSite=Strict` where no cross-site
+  authenticated navigation is needed.
+- **Brute-force lockout.** Per-account lockout means an attacker who knows an
+  email can lock that account on purpose; the lock expires (`Window`) so the
+  victim self-recovers. Also throttle on a network identity (client IP) at the
+  edge so one source can't drive another account's counter.
+- **Input bounds.** Value-object constructors cap length (email 254, id 255,
+  token 4096) so an unbounded attacker-controlled field can't be hashed or
+  stored.
+
 ## Engineering bar
 
 Per the Klarlabs default: TDD, gofmt, golangci-lint (gocritic + gosec), nox

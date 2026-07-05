@@ -120,6 +120,40 @@ func TestToken_Random(t *testing.T) {
 	}
 }
 
+// TestValueObject_LengthBounds asserts every constructor caps its input: a
+// value at the documented limit is accepted, one past it is rejected. Guards
+// against an unbounded email/token/id being hashed or stored (a cheap DoS).
+func TestValueObject_LengthBounds(t *testing.T) {
+	// UserID / TenantID: 255-char cap.
+	if _, err := domain.NewUserID(strings.Repeat("a", 255)); err != nil {
+		t.Fatalf("UserID at 255: %v", err)
+	}
+	if _, err := domain.NewUserID(strings.Repeat("a", 256)); !errors.Is(err, domain.ErrInvalidUserID) {
+		t.Fatalf("UserID at 256: want ErrInvalidUserID, got %v", err)
+	}
+	if _, err := domain.NewTenantID(strings.Repeat("a", 256)); !errors.Is(err, domain.ErrInvalidTenantID) {
+		t.Fatalf("TenantID at 256: want ErrInvalidTenantID, got %v", err)
+	}
+
+	// Email: 254-char cap (RFC 5321). Build valid addresses at and past it.
+	atLimit := strings.Repeat("a", 249) + "@b.co" // 249 + 1 + 4 = 254
+	if _, err := domain.NewEmail(atLimit); err != nil {
+		t.Fatalf("Email at 254: %v", err)
+	}
+	overLimit := strings.Repeat("a", 250) + "@b.co" // 255
+	if _, err := domain.NewEmail(overLimit); !errors.Is(err, domain.ErrInvalidEmail) {
+		t.Fatalf("Email at 255: want ErrInvalidEmail, got %v", err)
+	}
+
+	// Token: 4096-char cap.
+	if _, err := domain.TokenFromString(strings.Repeat("t", 4096)); err != nil {
+		t.Fatalf("Token at 4096: %v", err)
+	}
+	if _, err := domain.TokenFromString(strings.Repeat("t", 4097)); !errors.Is(err, domain.ErrInvalidToken) {
+		t.Fatalf("Token at 4097: want ErrInvalidToken, got %v", err)
+	}
+}
+
 // ── Password ────────────────────────────────────────────────
 
 func TestPasswordHash_VerifyAndFormat(t *testing.T) {

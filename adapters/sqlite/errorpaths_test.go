@@ -35,7 +35,7 @@ func TestErrorPaths_ClosedDB(t *testing.T) {
 	db := closedDB(t)
 
 	users := sqlite.NewUserRepo(db)
-	if _, err := users.GetUser(ctx, uid(t, "u1")); err == nil {
+	if _, err := users.GetUser(ctx, tid(t), uid(t, "u1")); err == nil {
 		t.Fatal("User.GetUser on closed DB must error")
 	}
 	if err := users.UpsertUser(ctx, domain.User{}); err == nil {
@@ -131,7 +131,12 @@ func TestErrorPaths_CorruptTimestamps(t *testing.T) {
 		 VALUES (?, ?, ?, ?, ?)`, "u", "t", "a@b.co", "garbage", "garbage"); err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
-	if _, err := sqlite.NewUserRepo(db).GetUser(ctx, uid(t, "u")); err == nil {
+	// Seeded under tenant "t"; the lookup must match it to reach the decode branch.
+	tenantT, err := domain.NewTenantID("t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sqlite.NewUserRepo(db).GetUser(ctx, tenantT, uid(t, "u")); err == nil {
 		t.Fatal("GetUser must reject a corrupt created_at")
 	}
 	// A second user with a valid created_at but a corrupt updated_at exercises
@@ -141,7 +146,7 @@ func TestErrorPaths_CorruptTimestamps(t *testing.T) {
 		 VALUES (?, ?, ?, ?, ?)`, "u2", "t", "a@b.co", time.Now().UTC().Format(time.RFC3339Nano), "garbage"); err != nil {
 		t.Fatalf("seed user2: %v", err)
 	}
-	if _, err := sqlite.NewUserRepo(db).GetUser(ctx, uid(t, "u2")); err == nil {
+	if _, err := sqlite.NewUserRepo(db).GetUser(ctx, tenantT, uid(t, "u2")); err == nil {
 		t.Fatal("GetUser must reject a corrupt updated_at")
 	}
 

@@ -10,6 +10,7 @@
 package memory
 
 import (
+	"bytes"
 	"context"
 	"sync"
 	"time"
@@ -28,15 +29,16 @@ func NewUserRepo() *UserRepo {
 	return &UserRepo{m: make(map[string]domain.UserSnapshot)}
 }
 
-// GetUser returns the user for an ID or domain.ErrNotFound.
-func (r *UserRepo) GetUser(ctx context.Context, id domain.UserID) (domain.User, error) {
+// GetUser returns the user with id within tenantID, or domain.ErrNotFound. A
+// user stored under a different tenant reads as ErrNotFound.
+func (r *UserRepo) GetUser(ctx context.Context, tenantID domain.TenantID, id domain.UserID) (domain.User, error) {
 	if err := ctx.Err(); err != nil {
 		return domain.User{}, err
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	snap, ok := r.m[id.String()]
-	if !ok {
+	if !ok || snap.TenantID != tenantID.String() {
 		return domain.User{}, domain.ErrNotFound
 	}
 	return domain.UserFromSnapshot(snap), nil
@@ -250,6 +252,17 @@ func NewPasskeyRepo() *PasskeyRepo {
 	return &PasskeyRepo{m: make(map[string]domain.PasskeyCredential)}
 }
 
+// clonePasskey deep-copies the credential's byte slices so the store never
+// aliases a caller's buffers. Without this, the []byte ID and PublicKey held in
+// the map would share backing arrays with whatever the caller passed to Add or
+// received from ListByUser — a later mutation of that buffer on either side
+// would silently corrupt stored credentials. bytes.Clone preserves nil.
+func clonePasskey(c domain.PasskeyCredential) domain.PasskeyCredential {
+	c.ID = bytes.Clone(c.ID)
+	c.PublicKey = bytes.Clone(c.PublicKey)
+	return c
+}
+
 // Add stores a credential.
 func (r *PasskeyRepo) Add(ctx context.Context, c domain.PasskeyCredential) error {
 	if err := ctx.Err(); err != nil {
@@ -257,7 +270,7 @@ func (r *PasskeyRepo) Add(ctx context.Context, c domain.PasskeyCredential) error
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.m[string(c.ID)] = c
+	r.m[string(c.ID)] = clonePasskey(c)
 	return nil
 }
 
@@ -271,7 +284,7 @@ func (r *PasskeyRepo) ListByUser(ctx context.Context, userID domain.UserID) ([]d
 	var out []domain.PasskeyCredential
 	for _, c := range r.m {
 		if c.UserID.String() == userID.String() {
-			out = append(out, c)
+			out = append(out, clonePasskey(c))
 		}
 	}
 	return out, nil
