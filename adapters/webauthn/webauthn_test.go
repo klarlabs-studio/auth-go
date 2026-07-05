@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
+
+	"github.com/go-webauthn/webauthn/protocol"
 
 	"github.com/klarlabs-studio/auth-go/adapters/memory"
 	"github.com/klarlabs-studio/auth-go/adapters/webauthn"
@@ -83,4 +86,132 @@ func TestBeginLogin_WithCredential(t *testing.T) {
 
 func TestInterfaceSatisfied(t *testing.T) {
 	var _ domain.PasskeyAuthenticator = (*webauthn.Authenticator)(nil)
+}
+
+// publicKeyOf extracts the "publicKey" member from a marshaled ceremony
+// options blob (CredentialCreation / CredentialAssertion both nest their
+// options under "publicKey").
+func publicKeyOf(t *testing.T, options []byte) map[string]any {
+	t.Helper()
+	var top map[string]any
+	if err := json.Unmarshal(options, &top); err != nil {
+		t.Fatalf("options invalid JSON: %v", err)
+	}
+	pk, ok := top["publicKey"].(map[string]any)
+	if !ok {
+		t.Fatalf("options missing publicKey object: %s", options)
+	}
+	return pk
+}
+
+func addCred(t *testing.T, ctx context.Context, repo *memory.PasskeyRepo, u domain.UserID) {
+	t.Helper()
+	if err := repo.Add(ctx, domain.PasskeyCredential{
+		ID: []byte{1, 2, 3, 4}, UserID: u, PublicKey: []byte{5, 6, 7, 8}, Name: "Key",
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Login options must request user verification "required" so a presence-only
+// authenticator cannot satisfy the passwordless factor (defaults to Required).
+func TestBeginLogin_RequiresUserVerification(t *testing.T) {
+	ctx := context.Background()
+	a, repo := newAuth(t)
+	u := mustUser(t, "u-uv")
+	addCred(t, ctx, repo, u)
+
+	opts, _, err := a.BeginLogin(ctx, u)
+	if err != nil {
+		t.Fatalf("begin login: %v", err)
+	}
+	pk := publicKeyOf(t, opts)
+	if got := pk["userVerification"]; got != "required" {
+		t.Fatalf("userVerification = %v, want required", got)
+	}
+}
+
+// Registration options must carry authenticatorSelection.userVerification
+// "required".
+func TestBeginRegistration_RequiresUserVerification(t *testing.T) {
+	a, _ := newAuth(t)
+	opts, _, err := a.BeginRegistration(context.Background(), mustUser(t, "u-reg"), "Felix")
+	if err != nil {
+		t.Fatalf("begin registration: %v", err)
+	}
+	pk := publicKeyOf(t, opts)
+	sel, ok := pk["authenticatorSelection"].(map[string]any)
+	if !ok {
+		t.Fatalf("options missing authenticatorSelection: %s", opts)
+	}
+	if got := sel["userVerification"]; got != "required" {
+		t.Fatalf("userVerification = %v, want required", got)
+	}
+}
+
+// A non-empty Config.UserVerification overrides the default.
+func TestConfig_UserVerificationOverride(t *testing.T) {
+	ctx := context.Background()
+	repo := memory.NewPasskeyRepo()
+	a, err := webauthn.New(webauthn.Config{
+		RPDisplayName:    "Klarlabs",
+		RPID:             "klarlabs.de",
+		RPOrigins:        []string{"https://app.klarlabs.de"},
+		UserVerification: protocol.VerificationDiscouraged,
+	}, repo)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	u := mustUser(t, "u-disc")
+	addCred(t, ctx, repo, u)
+
+	opts, _, err := a.BeginLogin(ctx, u)
+	if err != nil {
+		t.Fatalf("begin login: %v", err)
+	}
+	pk := publicKeyOf(t, opts)
+	if got := pk["userVerification"]; got != "discouraged" {
+		t.Fatalf("userVerification = %v, want discouraged", got)
+	}
+}
+
+// Enforcing Timeouts means the session blob carries a future Expires, so the
+// challenge cannot be replayed indefinitely.
+func TestBeginLogin_ChallengeExpirySet(t *testing.T) {
+	ctx := context.Background()
+	a, repo := newAuth(t)
+	u := mustUser(t, "u-exp")
+	addCred(t, ctx, repo, u)
+
+	_, state, err := a.BeginLogin(ctx, u)
+	if err != nil {
+		t.Fatalf("begin login: %v", err)
+	}
+	var session struct {
+		Expires time.Time `json:"expires"`
+	}
+	if err := json.Unmarshal(state, &session); err != nil {
+		t.Fatalf("state invalid JSON: %v", err)
+	}
+	if session.Expires.IsZero() {
+		t.Fatal("session Expires is zero: challenge expiry not enforced")
+	}
+	if !session.Expires.After(time.Now()) {
+		t.Fatalf("session Expires %v is not in the future", session.Expires)
+	}
+}
+
+// ErrCredentialCloned is a distinct, matchable sentinel. (The FinishLogin path
+// that returns it requires a real authenticator assertion with a regressed
+// signature counter, which cannot be forged in a unit test without a live
+// authenticator; the rejection logic itself is a straight-line CloneWarning
+// check. This test guards the exported sentinel's identity.)
+func TestErrCredentialCloned_IsSentinel(t *testing.T) {
+	if webauthn.ErrCredentialCloned == nil {
+		t.Fatal("ErrCredentialCloned is nil")
+	}
+	wrapped := errors.Join(errors.New("ctx"), webauthn.ErrCredentialCloned)
+	if !errors.Is(wrapped, webauthn.ErrCredentialCloned) {
+		t.Fatal("ErrCredentialCloned not matchable via errors.Is")
+	}
 }
