@@ -342,6 +342,37 @@ func (f *failSessionRepo) Delete(ctx context.Context, token domain.Token) error 
 	return f.SessionRepository.Delete(ctx, token)
 }
 
+func TestSessionService_TokenHashedAtRest(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	repo := memory.NewSessionRepo()
+	svc := domain.NewSessionService(repo, time.Hour, fixedClock(&now))
+
+	sess, err := svc.Issue(ctx, mustUserID(t, "u1"), mustTenantID(t, "t1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := sess.Token()
+
+	// The issued cookie value is the raw high-entropy token, not its hash.
+	if raw.String() == "" || raw.String() == domain.HashToken(raw) {
+		t.Fatal("issued token must be the raw value")
+	}
+	// At rest the session is keyed by the hash: the raw token must NOT resolve
+	// directly at the store (a leaked store must not hand out usable cookies)...
+	if _, err := repo.FindByToken(ctx, raw); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("raw token resolved at the store — session not hashed at rest (err=%v)", err)
+	}
+	// ...but the hash does, and the service still validates by the raw cookie.
+	hashed, _ := domain.TokenFromString(domain.HashToken(raw))
+	if _, err := repo.FindByToken(ctx, hashed); err != nil {
+		t.Errorf("hashed key should resolve the session, got %v", err)
+	}
+	if _, err := svc.Validate(ctx, raw); err != nil {
+		t.Errorf("Validate by the raw cookie token must succeed, got %v", err)
+	}
+}
+
 func TestSessionService_RotateDeleteFailureRollsBack(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
@@ -354,7 +385,8 @@ func TestSessionService_RotateDeleteFailureRollsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	sentinel := errors.New("db down")
-	fr.failToken = old.Token().String()
+	// Sessions are keyed at rest (and on Delete) by the token hash, so match on it.
+	fr.failToken = domain.HashToken(old.Token())
 	fr.deleteErr = sentinel
 
 	if _, err := svc.Rotate(ctx, old.Token()); !errors.Is(err, sentinel) {

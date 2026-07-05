@@ -63,6 +63,13 @@ func tid(t *testing.T, s string) domain.TenantID {
 	return id
 }
 
+// hkey returns the at-rest lookup key (SHA-256 hash) for a raw session token —
+// sessions are keyed by the hash, so direct repository lookups/deletes must hash.
+func hkey(raw domain.Token) domain.Token {
+	h, _ := domain.TokenFromString(domain.HashToken(raw))
+	return h
+}
+
 func TestUserRepo_Integration(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
@@ -129,7 +136,7 @@ func TestSessionRepo_Integration(t *testing.T) {
 	if err := svc.RevokeAll(ctx, uid(t, "u1")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repo.FindByToken(ctx, s.Token()); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := repo.FindByToken(ctx, hkey(s.Token())); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("revoke-all: want ErrNotFound, got %v", err)
 	}
 }
