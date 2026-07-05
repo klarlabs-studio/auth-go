@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/klarlabs-studio/auth-go/domain"
 )
@@ -327,6 +328,39 @@ func (r *LoginAttemptRepo) Save(ctx context.Context, s domain.LoginAttemptSnapsh
 func (r *LoginAttemptRepo) Delete(ctx context.Context, key string) error {
 	_, err := r.db.ExecContext(ctx, `DELETE FROM authgo_login_attempts WHERE key = $1`, key)
 	return err
+}
+
+// RecordFailureAtomically implements domain.AtomicLoginAttemptStore in a single
+// conditional UPSERT: failure_count + 1 is evaluated in SQL, so concurrent
+// failures for one key can't lose increments the way a Get→Save pair can.
+func (r *LoginAttemptRepo) RecordFailureAtomically(ctx context.Context, key string, now time.Time, maxFailures int, window time.Duration) (domain.LoginAttemptSnapshot, bool, error) {
+	lockAt := now.Add(window)
+	var snap domain.LoginAttemptSnapshot
+	var until sql.NullTime
+	err := r.db.QueryRowContext(ctx,
+		`INSERT INTO authgo_login_attempts (key, failure_count, locked_until, updated_at)
+		 VALUES ($1, 1, CASE WHEN 1 >= $3 THEN $4 ELSE NULL END, now())
+		 ON CONFLICT (key) DO UPDATE SET
+		   failure_count = CASE
+		     WHEN authgo_login_attempts.locked_until IS NOT NULL AND authgo_login_attempts.locked_until <= $2 THEN 1
+		     ELSE authgo_login_attempts.failure_count + 1 END,
+		   locked_until = CASE
+		     WHEN authgo_login_attempts.locked_until IS NOT NULL AND authgo_login_attempts.locked_until > $2 THEN authgo_login_attempts.locked_until
+		     WHEN (CASE WHEN authgo_login_attempts.locked_until IS NOT NULL AND authgo_login_attempts.locked_until <= $2 THEN 1 ELSE authgo_login_attempts.failure_count + 1 END) >= $3 THEN $4
+		     ELSE NULL END,
+		   updated_at = now()
+		 RETURNING failure_count, locked_until`,
+		key, now, maxFailures, lockAt,
+	).Scan(&snap.FailureCount, &until)
+	if err != nil {
+		return domain.LoginAttemptSnapshot{}, false, err
+	}
+	snap.Key = key
+	if until.Valid {
+		snap.LockedUntil = until.Time
+	}
+	justLocked := !snap.LockedUntil.IsZero() && snap.FailureCount == maxFailures
+	return snap, justLocked, nil
 }
 
 // WorkloadKeyRepo is a Postgres domain.WorkloadStore. Only the hex SHA-256 hash

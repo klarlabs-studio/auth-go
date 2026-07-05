@@ -73,6 +73,24 @@ type LoginAttemptStore interface {
 	Delete(ctx context.Context, key string) error
 }
 
+// AtomicLoginAttemptStore is an optional LoginAttemptStore capability: record a
+// failure in a single atomic step. The plain Get→Save path in RecordFailure
+// loses increments when failures for one key race (all read the same count),
+// which lets an attacker with N-way concurrency land far more than MaxFailures
+// verified guesses before the lock engages. A store implementing this — a
+// conditional single-statement UPSERT (sqlite/pgstore) or a mutexed map
+// (memory) — closes that gap; the LockoutService prefers it automatically.
+type AtomicLoginAttemptStore interface {
+	// RecordFailureAtomically, for key as of now, atomically resets the count if a
+	// prior lock has expired, increments the failure count, and sets LockedUntil
+	// to now+window once the count reaches maxFailures. It returns the resulting
+	// snapshot and whether this call is the one that engaged the lock (the count
+	// reached the threshold on this failure). Unlike the non-atomic fallback it
+	// does not "freeze" the count during an already-active lock — callers Guard
+	// before verifying, so a failure during an active lock is not expected.
+	RecordFailureAtomically(ctx context.Context, key string, now time.Time, maxFailures int, window time.Duration) (LoginAttemptSnapshot, bool, error)
+}
+
 // LockoutService is a domain service enforcing a LockoutPolicy over a
 // LoginAttemptStore. It owns the count/lock transitions; the store only
 // persists snapshots. The key is the caller's stable identifier for an
@@ -145,6 +163,13 @@ func (s *LockoutService) RecordFailure(ctx context.Context, key string) (locked 
 	key, err = normalizeLockoutKey(key)
 	if err != nil {
 		return false, err
+	}
+	// Atomic path: a store that can record-and-lock in a single statement closes
+	// the Get→Save race below, where concurrent failures for one key lose
+	// increments and let far more than MaxFailures guesses through before locking.
+	if a, ok := s.store.(AtomicLoginAttemptStore); ok {
+		_, justLocked, err := a.RecordFailureAtomically(ctx, key, s.now(), s.policy.maxFailures, s.policy.window)
+		return justLocked, err
 	}
 	snap, err := s.store.Get(ctx, key)
 	if err != nil && !errors.Is(err, ErrNotFound) {

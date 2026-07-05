@@ -384,6 +384,43 @@ func (f *failSessionRepo) Delete(ctx context.Context, token domain.Token) error 
 	return f.SessionRepository.Delete(ctx, token)
 }
 
+func TestLockoutService_RecordFailureIsAtomicUnderConcurrency(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	store := memory.NewLoginAttemptRepo()
+	policy, err := domain.NewLockoutPolicy(5, 15*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := domain.NewLockoutService(store, policy, fixedClock(&now))
+
+	// 20 concurrent failures for one key: the non-atomic Get→Save path loses most
+	// increments (all read the same count), so the account never locks. The
+	// atomic path must count every one.
+	const n = 20
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() { defer wg.Done(); _, _ = svc.RecordFailure(ctx, "user@x.co") }()
+	}
+	wg.Wait()
+
+	locked, err := svc.IsLocked(ctx, "user@x.co")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !locked {
+		t.Error("20 concurrent failures must lock a 5-failure account — increments were lost")
+	}
+	snap, err := store.Get(ctx, "user@x.co")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.FailureCount != n {
+		t.Errorf("failure count = %d, want %d (no lost increments)", snap.FailureCount, n)
+	}
+}
+
 func TestSessionService_TokenHashedAtRest(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)

@@ -160,6 +160,51 @@ func hkey(raw domain.Token) domain.Token {
 	return h
 }
 
+func TestLoginAttemptRepo_RecordFailureAtomically(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	repo := sqlite.NewLoginAttemptRepo(db)
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	const window = 15 * time.Minute
+
+	// Four failures: below the 5-failure threshold, not locked; count tracks.
+	for i := 1; i <= 4; i++ {
+		snap, justLocked, err := repo.RecordFailureAtomically(ctx, "k", now, 5, window)
+		if err != nil {
+			t.Fatalf("failure %d: %v", i, err)
+		}
+		if justLocked {
+			t.Fatalf("locked early at failure %d", i)
+		}
+		if snap.FailureCount != i {
+			t.Fatalf("count = %d, want %d", snap.FailureCount, i)
+		}
+	}
+	// Fifth failure engages the lock.
+	snap, justLocked, err := repo.RecordFailureAtomically(ctx, "k", now, 5, window)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !justLocked {
+		t.Error("5th failure should engage the lock")
+	}
+	if snap.LockedUntil.IsZero() {
+		t.Error("locked_until not set on the locking failure")
+	}
+	// After the window expires, the next failure resets the count to 1.
+	later := now.Add(20 * time.Minute)
+	snap, _, err = repo.RecordFailureAtomically(ctx, "k", later, 5, window)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.FailureCount != 1 {
+		t.Errorf("expired lock should reset count to 1, got %d", snap.FailureCount)
+	}
+	if !snap.LockedUntil.IsZero() {
+		t.Error("count-below-threshold after reset should clear the lock")
+	}
+}
+
 func TestSessionRepo_DeleteScopedToUser(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
