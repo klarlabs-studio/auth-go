@@ -4,12 +4,54 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/klarlabs-studio/auth-go/adapters/memory"
 	"github.com/klarlabs-studio/auth-go/domain"
 )
+
+func TestMagicLinkService_ConsumeIsSingleUseUnderConcurrency(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	repo := memory.NewMagicLinkRepo()
+	svc := domain.NewMagicLinkService(repo, 15*time.Minute, fixedClock(&now))
+
+	raw, err := svc.Issue(ctx, mustEmail(t, "a@b.co"), mustTenantID(t, "t1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Many requests redeem the same link at once; exactly one may win — the link
+	// is a passwordless login factor and must be strictly single-use.
+	const n = 16
+	var wg sync.WaitGroup
+	var success, consumed int32
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			switch _, err := svc.Consume(ctx, raw); {
+			case err == nil:
+				atomic.AddInt32(&success, 1)
+			case errors.Is(err, domain.ErrConsumed):
+				atomic.AddInt32(&consumed, 1)
+			default:
+				t.Errorf("unexpected consume error: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if success != 1 {
+		t.Errorf("single-use violated: %d concurrent consumes succeeded, want exactly 1", success)
+	}
+	if consumed != n-1 {
+		t.Errorf("want %d ErrConsumed, got %d", n-1, consumed)
+	}
+}
 
 func fixedClock(t *time.Time) domain.Clock { return func() time.Time { return *t } }
 

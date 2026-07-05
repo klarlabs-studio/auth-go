@@ -153,8 +153,8 @@ func TestMagicLinkRepo(t *testing.T) {
 	if err != nil || link.Email().String() != "a@b.co" {
 		t.Fatalf("consume: %v / %+v", err, link.Snapshot())
 	}
-	if err := repo.MarkConsumed(ctx, "does-not-exist"); !errors.Is(err, domain.ErrNotFound) {
-		t.Fatalf("mark unknown: want ErrNotFound, got %v", err)
+	if ok, err := repo.MarkConsumed(ctx, "does-not-exist"); ok || err != nil {
+		t.Fatalf("mark unknown: want (false, nil), got (%v, %v)", ok, err)
 	}
 }
 

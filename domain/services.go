@@ -169,8 +169,14 @@ func (s *MagicLinkService) Consume(ctx context.Context, raw Token) (MagicLink, e
 	if link.Expired(s.now()) {
 		return MagicLink{}, ErrExpired
 	}
-	if err := s.repo.MarkConsumed(ctx, link.hash); err != nil {
+	consumed, err := s.repo.MarkConsumed(ctx, link.hash)
+	if err != nil {
 		return MagicLink{}, err
+	}
+	if !consumed {
+		// A concurrent Consume already redeemed this single-use link between our
+		// read and the atomic flip — treat it as spent, not a fresh login.
+		return MagicLink{}, ErrConsumed
 	}
 	link.consumed = true
 	return link, nil

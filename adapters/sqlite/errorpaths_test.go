@@ -63,7 +63,7 @@ func TestErrorPaths_ClosedDB(t *testing.T) {
 	if _, err := ml.FindByHash(ctx, "x"); err == nil {
 		t.Fatal("MagicLink.FindByHash on closed DB must error")
 	}
-	if err := ml.MarkConsumed(ctx, "x"); err == nil {
+	if _, err := ml.MarkConsumed(ctx, "x"); err == nil {
 		t.Fatal("MarkConsumed on closed DB must error")
 	}
 
