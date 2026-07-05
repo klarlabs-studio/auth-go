@@ -61,15 +61,21 @@ func (s *SessionService) Issue(ctx context.Context, userID UserID, tenantID Tena
 	return sess, nil
 }
 
+// sessionKey is the at-rest lookup key for a raw session token: its SHA-256
+// hash, matching what Session.Snapshot persists. The repository port takes a
+// Token, so the hash is wrapped as one — the adapter keys on the string either
+// way, and the raw bearer token never has to be presented to storage.
+func sessionKey(raw Token) Token { return Token{v: HashToken(raw)} }
+
 // Validate returns the session for a token, deleting and rejecting it if
 // expired. Returns ErrNotFound / ErrExpired otherwise.
 func (s *SessionService) Validate(ctx context.Context, token Token) (Session, error) {
-	sess, err := s.repo.FindByToken(ctx, token)
+	sess, err := s.repo.FindByToken(ctx, sessionKey(token))
 	if err != nil {
 		return Session{}, err
 	}
 	if sess.Expired(s.now()) {
-		_ = s.repo.Delete(ctx, token)
+		_ = s.repo.Delete(ctx, sessionKey(token))
 		return Session{}, ErrExpired
 	}
 	return sess, nil
@@ -96,10 +102,10 @@ func (s *SessionService) Rotate(ctx context.Context, oldToken Token) (Session, e
 	if err != nil {
 		return Session{}, err
 	}
-	if err := s.repo.Delete(ctx, oldToken); err != nil {
+	if err := s.repo.Delete(ctx, sessionKey(oldToken)); err != nil {
 		// Roll back the just-issued session so a failed rotation does not leave
 		// two live tokens; best-effort cleanup, original delete error surfaced.
-		_ = s.repo.Delete(ctx, fresh.token)
+		_ = s.repo.Delete(ctx, sessionKey(fresh.token))
 		return Session{}, err
 	}
 	return fresh, nil
@@ -107,7 +113,7 @@ func (s *SessionService) Rotate(ctx context.Context, oldToken Token) (Session, e
 
 // Revoke deletes one session (logout).
 func (s *SessionService) Revoke(ctx context.Context, token Token) error {
-	return s.repo.Delete(ctx, token)
+	return s.repo.Delete(ctx, sessionKey(token))
 }
 
 // RevokeAll deletes every session for a user (logout-everywhere).

@@ -97,6 +97,14 @@ func TestUserRepo(t *testing.T) {
 	}
 }
 
+// hkey returns the at-rest lookup key (SHA-256 hash) for a raw session token.
+// Sessions are keyed by the hash, so direct repository lookups/deletes (which
+// bypass the service that normally hashes) must hash too.
+func hkey(raw domain.Token) domain.Token {
+	h, _ := domain.TokenFromString(domain.HashToken(raw))
+	return h
+}
+
 func TestSessionRepo(t *testing.T) {
 	ctx := context.Background()
 	repo := memory.NewSessionRepo()
@@ -107,14 +115,14 @@ func TestSessionRepo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := repo.FindByToken(ctx, s.Token())
+	got, err := repo.FindByToken(ctx, hkey(s.Token()))
 	if err != nil || got.UserID().String() != "u1" {
 		t.Fatalf("find: %v / %+v", err, got.Snapshot())
 	}
-	if err := repo.Delete(ctx, s.Token()); err != nil {
+	if err := repo.Delete(ctx, hkey(s.Token())); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repo.FindByToken(ctx, s.Token()); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := repo.FindByToken(ctx, hkey(s.Token())); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("after delete: want ErrNotFound, got %v", err)
 	}
 

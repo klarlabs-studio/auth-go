@@ -148,9 +148,16 @@ func TestSessionRepo(t *testing.T) {
 	if err := svc.RevokeAll(ctx, uid(t, "u1")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repo.FindByToken(ctx, s.Token()); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := repo.FindByToken(ctx, hkey(s.Token())); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("revoke-all: want ErrNotFound, got %v", err)
 	}
+}
+
+// hkey returns the at-rest lookup key (SHA-256 hash) for a raw session token —
+// sessions are keyed by the hash, so direct repository lookups/deletes must hash.
+func hkey(raw domain.Token) domain.Token {
+	h, _ := domain.TokenFromString(domain.HashToken(raw))
+	return h
 }
 
 func TestSessionRepo_DeleteScopedToUser(t *testing.T) {
@@ -165,17 +172,17 @@ func TestSessionRepo_DeleteScopedToUser(t *testing.T) {
 	if err := repo.DeleteByUser(ctx, uid(t, "u1")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repo.FindByToken(ctx, a.Token()); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := repo.FindByToken(ctx, hkey(a.Token())); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatal("u1 session survived DeleteByUser")
 	}
-	if _, err := repo.FindByToken(ctx, b.Token()); err != nil {
+	if _, err := repo.FindByToken(ctx, hkey(b.Token())); err != nil {
 		t.Fatalf("DeleteByUser hit another user: %v", err)
 	}
 	// single Delete
-	if err := repo.Delete(ctx, b.Token()); err != nil {
+	if err := repo.Delete(ctx, hkey(b.Token())); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repo.FindByToken(ctx, b.Token()); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := repo.FindByToken(ctx, hkey(b.Token())); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatal("Delete did not remove the session")
 	}
 }
@@ -635,7 +642,9 @@ func TestMigrateIdempotent(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db2.Close() })
 	repo2 := sqlite.NewSessionRepo(db2)
-	if _, err := repo2.FindByToken(ctx, s.Token()); err != nil {
+	// Sessions are keyed at rest by the token hash; look it up the same way.
+	hashed, _ := domain.TokenFromString(domain.HashToken(s.Token()))
+	if _, err := repo2.FindByToken(ctx, hashed); err != nil {
 		t.Fatalf("row lost across reopen: %v", err)
 	}
 }

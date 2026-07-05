@@ -50,10 +50,14 @@ type SessionSnapshot struct {
 	ExpiresAt time.Time
 }
 
-// Snapshot exports the session for storage.
+// Snapshot exports the session for storage. Token holds the SHA-256 hash of the
+// bearer token, never the raw value — the raw token lives only in the cookie, so
+// a read of the session store (backup, replica, injection) yields hashes, not
+// usable cookies. Matches the magic-link and workload-key hash-at-rest pattern;
+// lookups hash the incoming cookie token the same way (see SessionService).
 func (s Session) Snapshot() SessionSnapshot {
 	return SessionSnapshot{
-		Token:     s.token.v,
+		Token:     HashToken(s.token),
 		UserID:    s.userID.v,
 		TenantID:  s.tenantID.v,
 		CreatedAt: s.createdAt,
