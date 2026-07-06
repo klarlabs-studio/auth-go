@@ -1,4 +1,33 @@
 {
   "schema_version": "1.0.0",
-  "entries": []
+  "entries": [
+    {
+      "fingerprint": "50df99451002e699782cfe5357ae3ace320cbb1e1f162d4d77c72e07a8406598",
+      "rule_id": "SEC-083",
+      "file_path": "middleware/basicauth.go",
+      "severity": "medium",
+      "created_at": "2026-07-06T11:03:42.035797Z"
+    },
+    {
+      "fingerprint": "7378103a1497d6a525a904991594b2c7d19e3608e570c250548d4df03aa52aa8",
+      "rule_id": "SEC-161",
+      "file_path": "adapters/sqlite/db.go",
+      "severity": "medium",
+      "created_at": "2026-07-06T11:03:42.035797Z"
+    },
+    {
+      "fingerprint": "1af53d08b270187f0d9e96792bcff5e8fd5d53eebfaea90a85b3d1031f3591bc",
+      "rule_id": "SEC-163",
+      "file_path": "adapters/sqlite/db.go",
+      "severity": "medium",
+      "created_at": "2026-07-06T11:03:42.035797Z"
+    },
+    {
+      "fingerprint": "6e7db848d97796acc669df79c1b720f9d7aea646fc7dba1dbb9e463b770997a2",
+      "rule_id": "SEC-163",
+      "file_path": "domain/values.go",
+      "severity": "medium",
+      "created_at": "2026-07-06T11:03:42.035797Z"
+    }
+  ]
 }
