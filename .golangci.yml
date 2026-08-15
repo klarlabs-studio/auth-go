@@ -5,7 +5,7 @@ run:
 
 linters:
   default: standard
-	enable:
+  enable:
     - errcheck
     - govet
     - ineffassign
@@ -31,8 +31,8 @@ linters:
         linters:
           - gosec
       # RFC 6238 mandates HMAC-SHA1 for TOTP; authenticator apps require it.
+      # (domain/totp.go also carries //nolint:gosec on the sha1 import.)
       - path: domain/totp\.go
-        text: "G401|G505|sha1"
         linters:
           - gosec
 

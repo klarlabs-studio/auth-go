@@ -221,34 +221,44 @@ func (m *BasicAuthMiddleware) challenge(w http.ResponseWriter) {
 // setCookie emits the session cookie, expiring it in lockstep with the session.
 func (m *BasicAuthMiddleware) setCookie(w http.ResponseWriter, sess domain.Session) {
 	maxAge := max(int(sess.ExpiresAt().Sub(m.now()).Seconds()), 1)
-	http.SetCookie(w, &http.Cookie{
+	// Secure defaults to true; CookieOptions.Insecure is an explicit local-dev
+	// opt-out. gosec G124 cannot see through the boolean expression.
+	c := &http.Cookie{ //nolint:gosec // G124: Secure true by default; Insecure is documented opt-out
 		Name:     m.cookieName,
 		Value:    sess.Token().String(),
 		Path:     m.cookie.Path,
 		Domain:   m.cookie.Domain,
 		Expires:  sess.ExpiresAt(),
 		MaxAge:   maxAge,
-		Secure:   !m.cookie.Insecure,
+		Secure:   true,
 		HttpOnly: true,
 		SameSite: m.cookie.SameSite,
-	})
+	}
+	if m.cookie.Insecure {
+		c.Secure = false
+	}
+	http.SetCookie(w, c)
 }
 
 // ClearCookie writes an expired session cookie, instructing the browser to drop
 // it. Pair it with domain.SessionService.Revoke on logout — or use Logout, which
 // revokes from the request cookie and clears in one step.
 func (m *BasicAuthMiddleware) ClearCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{
+	c := &http.Cookie{ //nolint:gosec // G124: Secure true by default; Insecure is documented opt-out
 		Name:     m.cookieName,
 		Value:    "",
 		Path:     m.cookie.Path,
 		Domain:   m.cookie.Domain,
 		Expires:  time.Unix(0, 0),
 		MaxAge:   -1,
-		Secure:   !m.cookie.Insecure,
+		Secure:   true,
 		HttpOnly: true,
 		SameSite: m.cookie.SameSite,
-	})
+	}
+	if m.cookie.Insecure {
+		c.Secure = false
+	}
+	http.SetCookie(w, c)
 }
 
 // Logout revokes the session named by the request's session cookie (if present

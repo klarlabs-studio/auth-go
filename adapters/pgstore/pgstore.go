@@ -11,6 +11,8 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"errors"
+	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -357,8 +359,12 @@ func (r *PasskeyRepo) ListByUser(ctx context.Context, userID domain.UserID) ([]d
 		if err != nil {
 			return nil, err
 		}
+		sc, err := uint32SignCount(count)
+		if err != nil {
+			return nil, err
+		}
 		out = append(out, domain.PasskeyCredential{
-			ID: id, UserID: u, PublicKey: pub, SignCount: uint32(count), Name: name,
+			ID: id, UserID: u, PublicKey: pub, SignCount: sc, Name: name,
 		})
 	}
 	return out, rows.Err()
@@ -391,6 +397,15 @@ func requireOneRow(res sql.Result) error {
 		return domain.ErrNotFound
 	}
 	return nil
+}
+
+// uint32SignCount converts a scanned INTEGER sign_count into the WebAuthn
+// uint32 counter, rejecting values outside the type's range.
+func uint32SignCount(count int64) (uint32, error) {
+	if count < 0 || count > math.MaxUint32 {
+		return 0, fmt.Errorf("pgstore: sign_count out of range: %d", count)
+	}
+	return uint32(count), nil
 }
 
 // LoginAttemptRepo is a Postgres domain.LoginAttemptStore. Callers SHOULD pass

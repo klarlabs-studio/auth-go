@@ -96,7 +96,7 @@ func (h PasswordHash) Verify(plaintext string) error {
 	if err != nil {
 		return err
 	}
-	other := argon2.IDKey([]byte(plaintext), salt, params.Iterations, params.Memory, params.Parallelism, uint32(len(hash)))
+	other := argon2.IDKey([]byte(plaintext), salt, params.Iterations, params.Memory, params.Parallelism, uint32(len(hash))) //nolint:gosec // G115: PHC key length is bounded (KeyLength ≤ a few KiB)
 	if subtle.ConstantTimeCompare(hash, other) != 1 {
 		return ErrPasswordMismatch
 	}
