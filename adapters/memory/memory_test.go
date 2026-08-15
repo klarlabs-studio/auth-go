@@ -383,10 +383,9 @@ func TestWorkloadKeyRepo_Concurrency(t *testing.T) {
 }
 
 // TestWorkloadKeyRepo_ConcurrentRotate exercises RotateKey concurrently against
-// the in-memory store. RotateKey creates the new key before deleting the old,
-// so the two briefly overlap; run with -race to detect data races in the
-// store's two-map (byID/byHash) maintenance across that overlap window. After
-// all rotations settle, exactly one key must survive and validate.
+// the in-memory store (AtomicRotator under one mutex). Run with -race to detect
+// data races in the store's two-map (byID/byHash) maintenance. After all
+// rotations settle, exactly n keys must survive.
 func TestWorkloadKeyRepo_ConcurrentRotate(t *testing.T) {
 	ctx := context.Background()
 	repo := memory.NewWorkloadKeyRepo()
@@ -418,7 +417,7 @@ func TestWorkloadKeyRepo_ConcurrentRotate(t *testing.T) {
 				t.Errorf("rotate %s: %v", id, err)
 				return
 			}
-			// The rotated token must validate during/after the overlap window.
+			// The rotated token must validate.
 			if _, err := svc.ValidateKey(ctx, newRaw); err != nil {
 				t.Errorf("validate rotated %s: %v", newKey.ID(), err)
 			}

@@ -59,7 +59,7 @@ trace propagation.
 | TOTP | `domain.TOTPConfig` + `TOTPRepository` | RFC 6238, verified against the spec vector, clock-skew window, `otpauth://` URI; per-user secret persisted through the port |
 | Magic link | `domain.MagicLinkService` | single-use, TTL, only the SHA-256 hash stored; Issue invalidates prior links for email+tenant |
 | Passkeys | `adapters/webauthn` | WebAuthn; HMAC-signed ceremony state (`StateKey`); kept an adapter so the core carries only `x/crypto` |
-| Workload keys | `domain.WorkloadKeyService` | scoped API keys for agent workers — 256-bit token (stdlib only), only the SHA-256 hash stored, `resource:action` scopes with `tools:*` wildcards, issue/validate/authorize/revoke; rotate atomic on the sql adapters (`AtomicRotator`) |
+| Workload keys | `domain.WorkloadKeyService` | scoped API keys for agent workers — 256-bit token (stdlib only), only the SHA-256 hash stored, `resource:action` scopes with `tools:*` wildcards, issue/validate/authorize/revoke; rotate atomic on all first-party adapters (`AtomicRotator`) |
 | Basic auth | `middleware.BasicAuthMiddleware` | bootstrap-then-session handshake; `Basic` once, session cookie after — fits browser SPAs |
 
 ## Example
@@ -111,7 +111,7 @@ key, token, _ := wk.IssueKey(ctx, domain.KeyRequest{
     WorkerID: worker, Scope: scope, ExpiresAt: time.Now().Add(24 * time.Hour),
 })                                   // hand token.String() to the worker once — never stored
 err = wk.Authorize(ctx, token, "tools:write")     // validate + scope match (wildcard)
-_, newToken, _ := wk.RotateKey(ctx, key.ID())     // atomic on the sql adapters (single-tx swap); memory falls back to overlap-not-gap
+_, newToken, _ := wk.RotateKey(ctx, key.ID())     // atomic on memory/sqlite/pgstore (AtomicRotator)
 wk.RevokeAllKeys(ctx, worker)                     // kill-switch
 _ = newToken
 
