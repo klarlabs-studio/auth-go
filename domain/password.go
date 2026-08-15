@@ -10,6 +10,11 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
+// maxPasswordLen bounds plaintext accepted by HashPassword / Verify. An
+// unauthenticated login path feeds attacker-controlled bytes into argon2id; an
+// unbounded body is a cheap CPU/memory DoS. Real passwords sit far below this.
+const maxPasswordLen = 1024
+
 // Argon2idParams are the cost parameters for argon2id hashing.
 type Argon2idParams struct {
 	Memory      uint32 // KiB
@@ -30,12 +35,30 @@ func DefaultArgon2idParams() Argon2idParams {
 	}
 }
 
+// Validate reports ErrInvalidArgon2Params when any cost field is zero. Zero
+// Memory/Parallelism would panic inside x/crypto/argon2; rejecting early keeps
+// the failure a domain error.
+func (p Argon2idParams) Validate() error {
+	if p.Memory == 0 || p.Iterations == 0 || p.Parallelism == 0 || p.SaltLength == 0 || p.KeyLength == 0 {
+		return ErrInvalidArgon2Params
+	}
+	return nil
+}
+
 // PasswordHash is a value object: a PHC-encoded argon2id hash that knows how
 // to verify a plaintext against itself. A product stores its String().
 type PasswordHash struct{ encoded string }
 
 // HashPassword constructs a PasswordHash from a plaintext using argon2id.
+// Empty and over-long plaintexts return ErrInvalidPassword; invalid cost
+// parameters return ErrInvalidArgon2Params.
 func HashPassword(plaintext string, p Argon2idParams) (PasswordHash, error) {
+	if err := checkPasswordPlaintext(plaintext); err != nil {
+		return PasswordHash{}, err
+	}
+	if err := p.Validate(); err != nil {
+		return PasswordHash{}, err
+	}
 	salt := make([]byte, p.SaltLength)
 	if _, err := rand.Read(salt); err != nil {
 		return PasswordHash{}, err
@@ -62,8 +85,13 @@ func PasswordHashFromString(encoded string) (PasswordHash, error) {
 func (h PasswordHash) String() string { return h.encoded }
 
 // Verify checks a plaintext against the hash in constant time. Returns
-// ErrPasswordMismatch on a non-match.
+// ErrPasswordMismatch on a non-match, ErrInvalidPassword for an empty or
+// over-long plaintext (same bound as HashPassword), and ErrInvalidHash if the
+// stored encoding is corrupt.
 func (h PasswordHash) Verify(plaintext string) error {
+	if err := checkPasswordPlaintext(plaintext); err != nil {
+		return err
+	}
 	params, salt, hash, err := decodePHC(h.encoded)
 	if err != nil {
 		return err
@@ -71,6 +99,13 @@ func (h PasswordHash) Verify(plaintext string) error {
 	other := argon2.IDKey([]byte(plaintext), salt, params.Iterations, params.Memory, params.Parallelism, uint32(len(hash)))
 	if subtle.ConstantTimeCompare(hash, other) != 1 {
 		return ErrPasswordMismatch
+	}
+	return nil
+}
+
+func checkPasswordPlaintext(plaintext string) error {
+	if plaintext == "" || len(plaintext) > maxPasswordLen {
+		return ErrInvalidPassword
 	}
 	return nil
 }

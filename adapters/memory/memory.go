@@ -119,6 +119,23 @@ func (r *SessionRepo) DeleteByUser(ctx context.Context, userID domain.UserID) er
 	return nil
 }
 
+// RotateAtomically implements domain.AtomicSessionRotator: delete the old
+// at-rest key and insert the new session under one mutex hold.
+func (r *SessionRepo) RotateAtomically(ctx context.Context, oldKey domain.Token, newSess domain.Session) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.m[oldKey.String()]; !ok {
+		return domain.ErrNotFound
+	}
+	delete(r.m, oldKey.String())
+	snap := newSess.Snapshot()
+	r.m[snap.Token] = snap
+	return nil
+}
+
 // MagicLinkRepo is an in-memory domain.MagicLinkRepository.
 type MagicLinkRepo struct {
 	mu sync.RWMutex

@@ -37,6 +37,19 @@ func NewSessionService(repo SessionRepository, ttl time.Duration, clock Clock) *
 
 // Issue creates and persists a fresh session for a user/tenant.
 func (s *SessionService) Issue(ctx context.Context, userID UserID, tenantID TenantID) (Session, error) {
+	sess, err := s.newSession(userID, tenantID)
+	if err != nil {
+		return Session{}, err
+	}
+	if err := s.repo.Save(ctx, sess); err != nil {
+		return Session{}, err
+	}
+	return sess, nil
+}
+
+// newSession builds (but does not persist) a fresh Session. Shared by Issue and
+// Rotate so both paths set the raw token and its at-rest hash together.
+func (s *SessionService) newSession(userID UserID, tenantID TenantID) (Session, error) {
 	if userID.IsZero() {
 		return Session{}, ErrInvalidUserID
 	}
@@ -48,17 +61,14 @@ func (s *SessionService) Issue(ctx context.Context, userID UserID, tenantID Tena
 		return Session{}, err
 	}
 	t := s.now()
-	sess := Session{
+	return Session{
 		token:     tok,
+		tokenHash: HashToken(tok),
 		userID:    userID,
 		tenantID:  tenantID,
 		createdAt: t,
 		expiresAt: t.Add(s.ttl),
-	}
-	if err := s.repo.Save(ctx, sess); err != nil {
-		return Session{}, err
-	}
-	return sess, nil
+	}, nil
 }
 
 // sessionKey is the at-rest lookup key for a raw session token: its SHA-256
@@ -68,8 +78,15 @@ func (s *SessionService) Issue(ctx context.Context, userID UserID, tenantID Tena
 func sessionKey(raw Token) Token { return Token{v: HashToken(raw)} }
 
 // Validate returns the session for a token, deleting and rejecting it if
-// expired. Returns ErrNotFound / ErrExpired otherwise.
+// expired. Returns ErrNotFound / ErrExpired / ErrInvalidToken otherwise.
+//
+// The returned Session does not carry the raw cookie value (Token() is zero) —
+// revoke or rotate with the same raw token passed in here, not with
+// sess.Token().
 func (s *SessionService) Validate(ctx context.Context, token Token) (Session, error) {
+	if token.v == "" {
+		return Session{}, ErrInvalidToken
+	}
 	sess, err := s.repo.FindByToken(ctx, sessionKey(token))
 	if err != nil {
 		return Session{}, err
@@ -81,25 +98,40 @@ func (s *SessionService) Validate(ctx context.Context, token Token) (Session, er
 	return sess, nil
 }
 
-// Rotate re-issues a session: it validates oldToken, issues a fresh session for
+// Rotate re-issues a session: it validates oldToken, builds a fresh session for
 // the same user and tenant with a new token and a full lifetime measured from
-// now, persists it, and then deletes the old token — mitigating session
-// fixation by ensuring the post-authentication token is never one an attacker
-// could have planted earlier.
+// now, and swaps them — mitigating session fixation by ensuring the
+// post-authentication token is never one an attacker could have planted earlier.
 //
-// It returns the new Session. An unknown old token yields ErrNotFound and an
-// expired one ErrExpired (the expired session is purged, as in Validate); in
-// both cases nothing new is issued. The new session is created before the old
-// one is deleted, so a crash between the two steps leaves the old token briefly
-// live rather than leaving the caller with no session at all; the old token is
-// always invalidated on the success path.
+// It returns the new Session (with the raw cookie Token set). An unknown old
+// token yields ErrNotFound and an expired one ErrExpired (the expired session is
+// purged, as in Validate); in both cases nothing new is issued.
+//
+// If the repository implements AtomicSessionRotator (memory, sqlite, and
+// pgstore do), the swap is a single atomic step — no crash window with two live
+// tokens or zero. Otherwise it falls back to create-then-delete: the new
+// session is created before the old one is deleted, so a crash between the two
+// steps leaves both briefly live rather than leaving the caller with no session;
+// the old token is always invalidated on the success path.
 func (s *SessionService) Rotate(ctx context.Context, oldToken Token) (Session, error) {
 	old, err := s.Validate(ctx, oldToken)
 	if err != nil {
 		return Session{}, err
 	}
-	fresh, err := s.Issue(ctx, old.userID, old.tenantID)
+	fresh, err := s.newSession(old.userID, old.tenantID)
 	if err != nil {
+		return Session{}, err
+	}
+
+	if ar, ok := s.repo.(AtomicSessionRotator); ok {
+		if err := ar.RotateAtomically(ctx, sessionKey(oldToken), fresh); err != nil {
+			return Session{}, err
+		}
+		return fresh, nil
+	}
+
+	// Non-transactional fallback: create-then-delete with overlap.
+	if err := s.repo.Save(ctx, fresh); err != nil {
 		return Session{}, err
 	}
 	if err := s.repo.Delete(ctx, sessionKey(oldToken)); err != nil {
@@ -111,8 +143,12 @@ func (s *SessionService) Rotate(ctx context.Context, oldToken Token) (Session, e
 	return fresh, nil
 }
 
-// Revoke deletes one session (logout).
+// Revoke deletes one session (logout). token must be the raw cookie value —
+// not the zero Token() from a validated Session.
 func (s *SessionService) Revoke(ctx context.Context, token Token) error {
+	if token.v == "" {
+		return ErrInvalidToken
+	}
 	return s.repo.Delete(ctx, sessionKey(token))
 }
 

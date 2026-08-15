@@ -2,6 +2,8 @@ package domain
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"strings"
 	"time"
@@ -218,13 +220,23 @@ func (s *LockoutService) Clear(ctx context.Context, key string) error {
 	return s.store.Delete(ctx, key)
 }
 
+// LockoutKeyFromEmail returns a stable, non-reversible lockout key derived from
+// email (SHA-256 hex of the normalized address). Prefer this over storing the
+// raw email in authgo_login_attempts — the LoginAttemptStore port documents that
+// keys SHOULD be hashed at the adapter boundary so no plaintext PII is
+// persisted.
+func LockoutKeyFromEmail(email Email) string {
+	sum := sha256.Sum256([]byte(email.String()))
+	return hex.EncodeToString(sum[:])
+}
+
 // normalizeLockoutKey validates the key without mutating it. The key is
 // caller-chosen and opaque (the port docs recommend a hash of the email), so
 // the service must not lowercase or trim it — doing so could alias distinct
-// case-sensitive identifiers (e.g. base64 or raw hashes). Only blank keys are
-// rejected.
+// case-sensitive identifiers (e.g. base64 or raw hashes). Blank and over-long
+// keys are rejected.
 func normalizeLockoutKey(key string) (string, error) {
-	if strings.TrimSpace(key) == "" {
+	if strings.TrimSpace(key) == "" || len(key) > maxLockoutKeyLen {
 		return "", ErrInvalidLockoutKey
 	}
 	return key, nil

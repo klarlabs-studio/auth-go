@@ -306,7 +306,10 @@ func TestTOTPService_Verify(t *testing.T) {
 		t.Fatal(err)
 	}
 	code, _ := cfg.Generate(secret, now)
-	svc := domain.NewTOTPService(repo, cfg, fixedClock(&now))
+	svc, err := domain.NewTOTPService(repo, cfg, fixedClock(&now))
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// First use of a valid code succeeds.
 	if err := svc.Verify(ctx, uid, code); err != nil {
@@ -329,7 +332,10 @@ func TestTOTPService_Verify(t *testing.T) {
 	// was consumed — consumption gates on the step, not the whole secret.
 	later := now.Add(30 * time.Second)
 	next, _ := cfg.Generate(secret, later)
-	svcLater := domain.NewTOTPService(repo, cfg, fixedClock(&later))
+	svcLater, err := domain.NewTOTPService(repo, cfg, fixedClock(&later))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := svcLater.Verify(ctx, uid, next); err != nil {
 		t.Fatalf("next step: %v", err)
 	}
@@ -347,7 +353,10 @@ func TestTOTPService_ConsumeIsSingleUseUnderConcurrency(t *testing.T) {
 		t.Fatal(err)
 	}
 	code, _ := cfg.Generate(secret, now)
-	svc := domain.NewTOTPService(repo, cfg, fixedClock(&now))
+	svc, err := domain.NewTOTPService(repo, cfg, fixedClock(&now))
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	const n = 20
 	var wg sync.WaitGroup
@@ -395,13 +404,18 @@ func TestSessionService_Lifecycle(t *testing.T) {
 	if err != nil || got.UserID().String() != "u1" {
 		t.Fatalf("validate: %v / %+v", err, got.Snapshot())
 	}
+	// Validated sessions do not carry the raw cookie value.
+	if got.Token().String() != "" {
+		t.Fatal("Validate must not expose the raw cookie on Session.Token()")
+	}
 
 	// expiry purges
 	now = now.Add(2 * time.Hour)
 	if _, err := svc.Validate(ctx, s.Token()); !errors.Is(err, domain.ErrExpired) {
 		t.Fatalf("want ErrExpired, got %v", err)
 	}
-	if _, err := repo.FindByToken(ctx, s.Token()); !errors.Is(err, domain.ErrNotFound) {
+	hashed, _ := domain.TokenFromString(domain.HashToken(s.Token()))
+	if _, err := repo.FindByToken(ctx, hashed); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("expired not purged: %v", err)
 	}
 }
@@ -563,8 +577,69 @@ func TestSessionService_TokenHashedAtRest(t *testing.T) {
 	if _, err := repo.FindByToken(ctx, hashed); err != nil {
 		t.Errorf("hashed key should resolve the session, got %v", err)
 	}
-	if _, err := svc.Validate(ctx, raw); err != nil {
+	got, err := svc.Validate(ctx, raw)
+	if err != nil {
 		t.Errorf("Validate by the raw cookie token must succeed, got %v", err)
+	}
+	// Hydrated Token() is empty — Revoke(sess.Token()) must not silently no-op.
+	if got.Token().String() != "" {
+		t.Fatal("validated Session.Token() must be empty")
+	}
+	if err := svc.Revoke(ctx, got.Token()); !errors.Is(err, domain.ErrInvalidToken) {
+		t.Fatalf("Revoke(validated Token()): want ErrInvalidToken, got %v", err)
+	}
+	// Revoking the raw cookie still works.
+	if err := svc.Revoke(ctx, raw); err != nil {
+		t.Fatalf("Revoke(raw): %v", err)
+	}
+	if _, err := svc.Validate(ctx, raw); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("session survived Revoke(raw): %v", err)
+	}
+}
+
+func TestTOTPService_RequiresAtomicConsumer(t *testing.T) {
+	// A TOTPRepository that does not implement AtomicTOTPConsumer must fail at
+	// construction — silent replayable success is no longer allowed.
+	type bareRepo struct{ domain.TOTPRepository }
+	_, err := domain.NewTOTPService(bareRepo{memory.NewTOTPRepo()}, domain.DefaultTOTPConfig("x"), nil)
+	if !errors.Is(err, domain.ErrTOTPNoReplayProtection) {
+		t.Fatalf("want ErrTOTPNoReplayProtection, got %v", err)
+	}
+}
+
+func TestPasswordHash_RejectsOverlongAndEmpty(t *testing.T) {
+	p := domain.DefaultArgon2idParams()
+	if _, err := domain.HashPassword("", p); !errors.Is(err, domain.ErrInvalidPassword) {
+		t.Fatalf("empty: want ErrInvalidPassword, got %v", err)
+	}
+	if _, err := domain.HashPassword(strings.Repeat("x", 1025), p); !errors.Is(err, domain.ErrInvalidPassword) {
+		t.Fatalf("overlong: want ErrInvalidPassword, got %v", err)
+	}
+	h, err := domain.HashPassword("ok", p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Verify(strings.Repeat("x", 1025)); !errors.Is(err, domain.ErrInvalidPassword) {
+		t.Fatalf("verify overlong: want ErrInvalidPassword, got %v", err)
+	}
+	bad := domain.Argon2idParams{}
+	if _, err := domain.HashPassword("ok", bad); !errors.Is(err, domain.ErrInvalidArgon2Params) {
+		t.Fatalf("zero params: want ErrInvalidArgon2Params, got %v", err)
+	}
+}
+
+func TestLockoutKeyFromEmail(t *testing.T) {
+	em := mustEmail(t, "Felix@Klarlabs.de")
+	k := domain.LockoutKeyFromEmail(em)
+	if len(k) != 64 {
+		t.Fatalf("want 64 hex chars, got %d (%q)", len(k), k)
+	}
+	// NewEmail lowercases, so mixed-case input collapses to one key.
+	if domain.LockoutKeyFromEmail(mustEmail(t, "felix@klarlabs.de")) != k {
+		t.Fatal("key must be stable for the normalized email")
+	}
+	if k == em.String() {
+		t.Fatal("lockout key must not be the plaintext email")
 	}
 }
 

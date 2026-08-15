@@ -245,6 +245,33 @@ func TestSessionRepo_DeleteScopedToUser(t *testing.T) {
 	}
 }
 
+func TestSessionRepo_RotateAtomically(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	repo := sqlite.NewSessionRepo(db)
+	now := time.Now().UTC().Truncate(time.Second)
+	svc := domain.NewSessionService(repo, time.Hour, func() time.Time { return now })
+
+	old, err := svc.Issue(ctx, uid(t, "u1"), tid(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := svc.Rotate(ctx, old.Token())
+	if err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	if _, err := svc.Validate(ctx, old.Token()); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("old survived atomic rotate: %v", err)
+	}
+	if _, err := svc.Validate(ctx, fresh.Token()); err != nil {
+		t.Fatalf("fresh invalid: %v", err)
+	}
+	absent, _ := domain.TokenFromString(strings.Repeat("a", 64))
+	if err := repo.RotateAtomically(ctx, absent, fresh); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("absent old key: want ErrNotFound, got %v", err)
+	}
+}
+
 func TestMagicLinkRepo(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)

@@ -116,7 +116,7 @@ _ = newToken
 
 // Basic-auth handshake: Authorization: Basic once, session cookie after.
 mw, _ := middleware.NewBasicAuthMiddleware(middleware.BasicAuthConfig{
-    Verifier: middleware.AuthenticatorFunc(func(user, pass string) (domain.UserID, domain.TenantID, error) {
+    Verifier: middleware.AuthenticatorFunc(func(ctx context.Context, user, pass string) (domain.UserID, domain.TenantID, error) {
         // look up the user, verify with PasswordHash.Verify, return the identity
         return uid, tid, nil // or middleware.ErrInvalidCredentials
     }),
@@ -126,6 +126,7 @@ mw, _ := middleware.NewBasicAuthMiddleware(middleware.BasicAuthConfig{
 })
 http.Handle("/ui/", mw.Middleware(uiHandler))
 // downstream: sess, _ := middleware.SessionFromContext(r.Context())
+// logout: mw.Logout(w, r)  // revokes from cookie; do not Revoke(sess.Token()) after Validate
 ```
 
 ## Security posture
@@ -135,7 +136,16 @@ What the library guarantees, and where the deployment must meet it halfway:
 - **Secrets at rest.** Session tokens, magic links, and workload keys are stored
   as SHA-256 hashes; passwords as argon2id. Only the TOTP shared secret is stored
   recoverable (HOTP needs the raw secret to verify a code) — protect that column
-  with database column encryption or a protected schema.
+  with `WithCipher` (AES-GCM via `aesgcm`) or database column encryption / a
+  protected schema. Prefer wiring `WithCipher` in production.
+- **Session cookie vs Session.Token().** `Issue` / `Rotate` return a Session
+  whose `Token()` is the raw cookie value. After `Validate`, `Token()` is empty
+  — the raw bearer is not recoverable from storage. Revoke with the cookie
+  string (or `BasicAuthMiddleware.Logout`), never `Revoke(sess.Token())` from a
+  validated session.
+- **TOTP replay.** Use `TOTPService` (requires an `AtomicTOTPConsumer` repo —
+  all first-party adapters). `TOTPConfig.Validate` remains available and is
+  intentionally replay-prone within the skew window.
 - **Tenant isolation.** `UserRepository.GetUser` is tenant-scoped: a `UserID`
   belonging to another tenant reads as `ErrNotFound` even though IDs are globally
   unique. This is defense in depth *alongside*, not instead of, database
@@ -149,10 +159,15 @@ What the library guarantees, and where the deployment must meet it halfway:
 - **Brute-force lockout.** Per-account lockout means an attacker who knows an
   email can lock that account on purpose; the lock expires (`Window`) so the
   victim self-recovers. Also throttle on a network identity (client IP) at the
-  edge so one source can't drive another account's counter.
-- **Input bounds.** Value-object constructors cap length (email 254, id 255,
-  token 4096) so an unbounded attacker-controlled field can't be hashed or
-  stored.
+  edge so one source can't drive another account's counter. Prefer
+  `LockoutKeyFromEmail` so `authgo_login_attempts` does not store plaintext
+  email.
+- **Input bounds.** Value-object constructors cap length (email 254, id/worker
+  255, token 4096, password 1024, lockout key 255) so an unbounded
+  attacker-controlled field can't be hashed or stored.
+- **Passkey ceremony state.** The WebAuthn `state` blob is unsigned JSON and
+  MUST stay server-side (never round-tripped through the client); see
+  `adapters/webauthn` package docs.
 
 ## Engineering bar
 

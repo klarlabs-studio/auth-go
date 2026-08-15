@@ -70,10 +70,12 @@ type TOTPRepository interface {
 	DeleteSecret(ctx context.Context, userID UserID) error
 }
 
-// AtomicTOTPConsumer is an optional TOTPRepository capability enabling single-use
-// codes: it records the last successfully consumed time step per user and reports
-// whether a step is fresh. Without it a valid code is replayable within its ±Skew
-// window (RFC 6238 §5.2). TOTPService uses it when the repository provides it.
+// AtomicTOTPConsumer is a TOTPRepository capability enabling single-use codes:
+// it records the last successfully consumed time step per user and reports
+// whether a step is fresh. Without it a valid code is replayable within its
+// ±Skew window (RFC 6238 §5.2). NewTOTPService requires the repository to
+// implement it — the memory/sqlite/pgstore adapters all do. For a one-shot
+// check without persistence use TOTPConfig.Validate (documented as replay-prone).
 type AtomicTOTPConsumer interface {
 	// ConsumeStep atomically records step as userID's last-consumed step and
 	// returns true if it was fresh (strictly greater than the previous), false on
@@ -82,18 +84,25 @@ type AtomicTOTPConsumer interface {
 }
 
 // TOTPService verifies a user's TOTP codes with replay protection. It loads the
-// enrolled secret, validates the code, and — when the repository implements
-// AtomicTOTPConsumer — atomically consumes the matched time step so a code can't
-// be reused within its ±Skew window (RFC 6238 §5.2).
+// enrolled secret, validates the code, and atomically consumes the matched time
+// step so a code can't be reused within its ±Skew window (RFC 6238 §5.2).
 type TOTPService struct {
-	repo TOTPRepository
-	cfg  TOTPConfig
-	now  Clock
+	repo     TOTPRepository
+	consumer AtomicTOTPConsumer
+	cfg      TOTPConfig
+	now      Clock
 }
 
-// NewTOTPService builds the service. A nil clock uses the wall clock.
-func NewTOTPService(repo TOTPRepository, cfg TOTPConfig, clock Clock) *TOTPService {
-	return &TOTPService{repo: repo, cfg: cfg, now: orSystemClock(clock)}
+// NewTOTPService builds the service. repo must implement AtomicTOTPConsumer
+// (all first-party adapters do); otherwise it returns ErrTOTPNoReplayProtection
+// so replay-safe verification cannot be silently skipped. A nil clock uses the
+// wall clock.
+func NewTOTPService(repo TOTPRepository, cfg TOTPConfig, clock Clock) (*TOTPService, error) {
+	consumer, ok := repo.(AtomicTOTPConsumer)
+	if !ok {
+		return nil, ErrTOTPNoReplayProtection
+	}
+	return &TOTPService{repo: repo, consumer: consumer, cfg: cfg, now: orSystemClock(clock)}, nil
 }
 
 // Verify checks code against userID's enrolled secret. It returns ErrNotFound if
@@ -110,14 +119,7 @@ func (s *TOTPService) Verify(ctx context.Context, userID UserID, code string) er
 	if err != nil {
 		return err
 	}
-	consumer, ok := s.repo.(AtomicTOTPConsumer)
-	if !ok {
-		// The store can't record consumed steps, so the code validates but stays
-		// replayable within its window. Back TOTPService with a repository that
-		// implements AtomicTOTPConsumer for single-use enforcement.
-		return nil
-	}
-	fresh, err := consumer.ConsumeStep(ctx, userID, step)
+	fresh, err := s.consumer.ConsumeStep(ctx, userID, step)
 	if err != nil {
 		return err
 	}

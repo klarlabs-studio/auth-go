@@ -18,7 +18,9 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/klarlabs-studio/auth-go/domain"
 )
@@ -28,6 +30,10 @@ import (
 // user and a wrong password so the boundary does not leak which was wrong.
 var ErrInvalidCredentials = errors.New("middleware: invalid credentials")
 
+// ErrInvalidRealm is returned by NewBasicAuthMiddleware when Realm contains
+// characters that would break or inject into the WWW-Authenticate header.
+var ErrInvalidRealm = errors.New("middleware: invalid realm")
+
 // Authenticator verifies basic-auth credentials and returns the identity to
 // mint a session for. Implementations own credential storage and MUST verify
 // the password in constant time — domain.PasswordHash.Verify does this. Return
@@ -35,17 +41,18 @@ var ErrInvalidCredentials = errors.New("middleware: invalid credentials")
 //
 // The port deliberately lives here, in the inbound adapter, rather than in the
 // domain: how a product stores and checks credentials is its concern; the
-// middleware only needs the resulting identity.
+// middleware only needs the resulting identity. ctx carries cancellation,
+// deadlines, and trace from the inbound request into credential I/O.
 type Authenticator interface {
-	Authenticate(username, password string) (domain.UserID, domain.TenantID, error)
+	Authenticate(ctx context.Context, username, password string) (domain.UserID, domain.TenantID, error)
 }
 
 // AuthenticatorFunc adapts a function to the Authenticator interface.
-type AuthenticatorFunc func(username, password string) (domain.UserID, domain.TenantID, error)
+type AuthenticatorFunc func(ctx context.Context, username, password string) (domain.UserID, domain.TenantID, error)
 
 // Authenticate calls f.
-func (f AuthenticatorFunc) Authenticate(username, password string) (domain.UserID, domain.TenantID, error) {
-	return f(username, password)
+func (f AuthenticatorFunc) Authenticate(ctx context.Context, username, password string) (domain.UserID, domain.TenantID, error) {
+	return f(ctx, username, password)
 }
 
 // CookieOptions tunes the session cookie's attributes. The zero value is a
@@ -77,7 +84,7 @@ type BasicAuthConfig struct {
 	// Sessions mints and validates the server-side session. Required.
 	Sessions *domain.SessionService
 	// Realm is the WWW-Authenticate realm presented on challenge.
-	// Default "Restricted".
+	// Default "Restricted". Must not contain '"' or control characters.
 	Realm string
 	// CookieName is the session cookie name. Required.
 	CookieName string
@@ -121,6 +128,9 @@ func NewBasicAuthMiddleware(cfg BasicAuthConfig) (*BasicAuthMiddleware, error) {
 	if realm == "" {
 		realm = "Restricted"
 	}
+	if err := validateRealm(realm); err != nil {
+		return nil, err
+	}
 	now := cfg.Now
 	if now == nil {
 		now = domain.SystemClock
@@ -133,6 +143,20 @@ func NewBasicAuthMiddleware(cfg BasicAuthConfig) (*BasicAuthMiddleware, error) {
 		cookie:     cookie,
 		now:        now,
 	}, nil
+}
+
+// validateRealm rejects values that would break or inject into
+// `WWW-Authenticate: Basic realm="…"`.
+func validateRealm(realm string) error {
+	if strings.ContainsRune(realm, '"') || strings.ContainsRune(realm, '\\') {
+		return ErrInvalidRealm
+	}
+	for _, r := range realm {
+		if unicode.IsControl(r) {
+			return ErrInvalidRealm
+		}
+	}
+	return nil
 }
 
 // Middleware wraps next, authenticating each request. On success the
@@ -153,7 +177,7 @@ func (m *BasicAuthMiddleware) Middleware(next http.Handler) http.Handler {
 			m.challenge(w)
 			return
 		}
-		uid, tid, err := m.verifier.Authenticate(user, pass)
+		uid, tid, err := m.verifier.Authenticate(r.Context(), user, pass)
 		if err != nil {
 			// Opaque 401 regardless of why verification failed.
 			m.challenge(w)
@@ -211,7 +235,8 @@ func (m *BasicAuthMiddleware) setCookie(w http.ResponseWriter, sess domain.Sessi
 }
 
 // ClearCookie writes an expired session cookie, instructing the browser to drop
-// it. Pair it with domain.SessionService.Revoke on logout.
+// it. Pair it with domain.SessionService.Revoke on logout — or use Logout, which
+// revokes from the request cookie and clears in one step.
 func (m *BasicAuthMiddleware) ClearCookie(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     m.cookieName,
@@ -226,6 +251,19 @@ func (m *BasicAuthMiddleware) ClearCookie(w http.ResponseWriter) {
 	})
 }
 
+// Logout revokes the session named by the request's session cookie (if present
+// and well-formed) and clears the cookie. Prefer this over
+// Revoke(sess.Token()) after Validate — a validated Session does not carry the
+// raw cookie value, so that pattern is a silent no-op.
+func (m *BasicAuthMiddleware) Logout(w http.ResponseWriter, r *http.Request) {
+	if c, err := r.Cookie(m.cookieName); err == nil {
+		if tok, err := domain.TokenFromString(c.Value); err == nil {
+			_ = m.sessions.Revoke(r.Context(), tok)
+		}
+	}
+	m.ClearCookie(w)
+}
+
 type ctxKey int
 
 const sessionCtxKey ctxKey = iota
@@ -235,7 +273,9 @@ func withSession(ctx context.Context, sess domain.Session) context.Context {
 }
 
 // SessionFromContext returns the authenticated session attached by the
-// middleware, and whether one was present.
+// middleware, and whether one was present. The Session's Token() is only set
+// immediately after a Basic handshake (Issue); on cookie-authenticated
+// requests it is zero — use Logout or Revoke with the cookie value to log out.
 func SessionFromContext(ctx context.Context) (domain.Session, bool) {
 	sess, ok := ctx.Value(sessionCtxKey).(domain.Session)
 	return sess, ok

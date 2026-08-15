@@ -1,6 +1,8 @@
 package middleware_test
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -22,7 +24,7 @@ func fixedAuthenticator(t *testing.T, wantUser, wantPass, uid, tid string) middl
 	if err != nil {
 		t.Fatalf("tenant id: %v", err)
 	}
-	return middleware.AuthenticatorFunc(func(user, pass string) (domain.UserID, domain.TenantID, error) {
+	return middleware.AuthenticatorFunc(func(ctx context.Context, user, pass string) (domain.UserID, domain.TenantID, error) {
 		if user != wantUser || pass != wantPass {
 			return domain.UserID{}, domain.TenantID{}, middleware.ErrInvalidCredentials
 		}
@@ -60,7 +62,7 @@ func probe(seen *bool, gotSession *domain.Session) http.Handler {
 
 func TestNewBasicAuthMiddleware_RequiredFields(t *testing.T) {
 	sessions := domain.NewSessionService(memory.NewSessionRepo(), time.Hour, nil)
-	auth := middleware.AuthenticatorFunc(func(string, string) (domain.UserID, domain.TenantID, error) {
+	auth := middleware.AuthenticatorFunc(func(context.Context, string, string) (domain.UserID, domain.TenantID, error) {
 		return domain.UserID{}, domain.TenantID{}, nil
 	})
 	tests := []struct {
@@ -70,6 +72,7 @@ func TestNewBasicAuthMiddleware_RequiredFields(t *testing.T) {
 		{"no verifier", middleware.BasicAuthConfig{Sessions: sessions, CookieName: "sid"}},
 		{"no sessions", middleware.BasicAuthConfig{Verifier: auth, CookieName: "sid"}},
 		{"no cookie name", middleware.BasicAuthConfig{Verifier: auth, Sessions: sessions}},
+		{"bad realm", middleware.BasicAuthConfig{Verifier: auth, Sessions: sessions, CookieName: "sid", Realm: `evil"realm`}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -147,6 +150,9 @@ func TestBasicAuth_SubsequentRequestUsesCookieNotCredentials(t *testing.T) {
 	}
 	if got.UserID().String() != "user-1" {
 		t.Fatalf("session identity lost: %s", got.UserID())
+	}
+	if got.Token().String() != "" {
+		t.Fatal("cookie-authenticated Session.Token() must be empty (raw is only on Issue)")
 	}
 }
 
@@ -278,5 +284,55 @@ func TestBasicAuth_ClearCookie(t *testing.T) {
 	}
 	if c.Value != "" {
 		t.Fatal("ClearCookie value must be empty")
+	}
+}
+
+func TestBasicAuth_LogoutRevokesFromCookie(t *testing.T) {
+	now := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
+	sessions := domain.NewSessionService(memory.NewSessionRepo(), time.Hour, func() time.Time { return now })
+	mw, err := middleware.NewBasicAuthMiddleware(middleware.BasicAuthConfig{
+		Verifier:   fixedAuthenticator(t, "admin", "s3cret", "user-1", "tenant-1"),
+		Sessions:   sessions,
+		CookieName: "sid",
+		Now:        func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var seen bool
+	var got domain.Session
+	h := mw.Middleware(probe(&seen, &got))
+	req := httptest.NewRequest(http.MethodGet, "/ui/", nil)
+	req.SetBasicAuth("admin", "s3cret")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	cookie := rec.Result().Cookies()[0]
+	raw, err := domain.TokenFromString(cookie.Value)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Logout with the cookie: session revoked + cookie cleared.
+	req2 := httptest.NewRequest(http.MethodPost, "/logout", nil)
+	req2.AddCookie(cookie)
+	rec2 := httptest.NewRecorder()
+	mw.Logout(rec2, req2)
+	if _, err := sessions.Validate(context.Background(), raw); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("session survived Logout: %v", err)
+	}
+	cleared := rec2.Result().Cookies()[0]
+	if cleared.MaxAge >= 0 || cleared.Value != "" {
+		t.Fatalf("Logout must clear cookie, got %+v", cleared)
+	}
+
+	// Cookie alone no longer authenticates.
+	seen = false
+	req3 := httptest.NewRequest(http.MethodGet, "/ui/", nil)
+	req3.AddCookie(cookie)
+	rec3 := httptest.NewRecorder()
+	h.ServeHTTP(rec3, req3)
+	if rec3.Code != http.StatusUnauthorized || seen {
+		t.Fatalf("post-logout cookie should challenge: status=%d ran=%v", rec3.Code, seen)
 	}
 }

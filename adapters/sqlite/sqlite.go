@@ -124,6 +124,41 @@ func (r *SessionRepo) DeleteByUser(ctx context.Context, userID domain.UserID) er
 	return err
 }
 
+// RotateAtomically implements domain.AtomicSessionRotator: delete oldKey and
+// insert newSess in a single transaction (or directly when already inside a Tx).
+func (r *SessionRepo) RotateAtomically(ctx context.Context, oldKey domain.Token, newSess domain.Session) error {
+	beginner, ok := r.db.(txBeginner)
+	if !ok {
+		return sessionRotateSwap(ctx, r.db, oldKey, newSess)
+	}
+	tx, err := beginner.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if err := sessionRotateSwap(ctx, tx, oldKey, newSess); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+func sessionRotateSwap(ctx context.Context, db DB, oldKey domain.Token, newSess domain.Session) error {
+	res, err := db.ExecContext(ctx, `DELETE FROM authgo_sessions WHERE token = ?`, oldKey.String())
+	if err != nil {
+		return err
+	}
+	if err := requireOneRow(res); err != nil {
+		return err
+	}
+	snap := newSess.Snapshot()
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO authgo_sessions (token, user_id, tenant_id, created_at, expires_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		snap.Token, snap.UserID, snap.TenantID, encodeTime(snap.CreatedAt), encodeTime(snap.ExpiresAt),
+	)
+	return err
+}
+
 // MagicLinkRepo is a SQLite domain.MagicLinkRepository.
 type MagicLinkRepo struct{ db DB }
 
