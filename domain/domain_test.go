@@ -683,6 +683,43 @@ func TestSessionService_RejectsZeroIDs(t *testing.T) {
 
 // ── Magic link service ──────────────────────────────────────
 
+func TestMagicLinkService_IssueInvalidatesPrior(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	repo := memory.NewMagicLinkRepo()
+	svc := domain.NewMagicLinkService(repo, 15*time.Minute, fixedClock(&now))
+	em := mustEmail(t, "a@b.co")
+	tn := mustTenantID(t, "t1")
+
+	first, err := svc.Issue(ctx, em, tn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := svc.Issue(ctx, em, tn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Consume(ctx, first); !errors.Is(err, domain.ErrConsumed) {
+		t.Fatalf("first link after re-issue: want ErrConsumed, got %v", err)
+	}
+	if _, err := svc.Consume(ctx, second); err != nil {
+		t.Fatalf("second link should redeem: %v", err)
+	}
+	// A different tenant's outstanding link is untouched.
+	other, err := svc.Issue(ctx, em, mustTenantID(t, "t2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	third, err := svc.Issue(ctx, em, tn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Consume(ctx, other); err != nil {
+		t.Fatalf("cross-tenant link invalidated: %v", err)
+	}
+	_ = third
+}
+
 func TestMagicLinkService_SingleUse(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)

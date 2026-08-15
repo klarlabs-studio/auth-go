@@ -66,8 +66,13 @@ func TestErrorPaths_ClosedDB(t *testing.T) {
 	if _, err := ml.MarkConsumed(ctx, "x"); err == nil {
 		t.Fatal("MarkConsumed on closed DB must error")
 	}
+	em, _ := domain.NewEmail("a@b.co")
+	tn, _ := domain.NewTenantID("t1")
+	if err := ml.InvalidateOutstanding(ctx, em, tn); err == nil {
+		t.Fatal("InvalidateOutstanding on closed DB must error")
+	}
 
-	totp := sqlite.NewTOTPRepo(db)
+	totp := sqlite.NewPlaintextTOTPRepo(db)
 	if _, err := totp.GetSecret(ctx, uid(t, "u1")); err == nil {
 		t.Fatal("TOTP.GetSecret on closed DB must error")
 	}
@@ -156,7 +161,7 @@ func TestErrorPaths_CorruptTimestamps(t *testing.T) {
 		`INSERT INTO authgo_totp_secrets (user_id, secret) VALUES (?, ?)`, "u-totp", "not!base32!"); err != nil {
 		t.Fatalf("seed totp: %v", err)
 	}
-	if _, err := sqlite.NewTOTPRepo(db).GetSecret(ctx, uid(t, "u-totp")); err == nil {
+	if _, err := sqlite.NewPlaintextTOTPRepo(db).GetSecret(ctx, uid(t, "u-totp")); err == nil {
 		t.Fatal("GetSecret must reject a corrupt secret")
 	}
 

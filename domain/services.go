@@ -170,10 +170,15 @@ func NewMagicLinkService(repo MagicLinkRepository, ttl time.Duration, clock Cloc
 }
 
 // Issue creates a link and returns the RAW token to embed in the emailed URL.
-// The raw token is never persisted — only its hash.
+// The raw token is never persisted — only its hash. Any previously unconsumed
+// links for the same email+tenant are invalidated first so only the newly
+// emailed token remains redeemable.
 func (s *MagicLinkService) Issue(ctx context.Context, email Email, tenantID TenantID) (Token, error) {
 	if tenantID.IsZero() {
 		return Token{}, ErrInvalidTenantID
+	}
+	if err := s.repo.InvalidateOutstanding(ctx, email, tenantID); err != nil {
+		return Token{}, err
 	}
 	raw, err := NewToken()
 	if err != nil {

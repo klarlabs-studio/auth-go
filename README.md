@@ -57,8 +57,8 @@ trace propagation.
 | Sessions | `domain.SessionService` | opaque 256-bit token, TTL, rotate (anti-fixation), revoke + logout-everywhere |
 | Password | `domain.PasswordHash` | argon2id, PHC encoding, OWASP-2024 defaults, constant-time verify |
 | TOTP | `domain.TOTPConfig` + `TOTPRepository` | RFC 6238, verified against the spec vector, clock-skew window, `otpauth://` URI; per-user secret persisted through the port |
-| Magic link | `domain.MagicLinkService` | single-use, TTL, only the SHA-256 hash stored |
-| Passkeys | `adapters/webauthn` | WebAuthn; kept an adapter so the core carries only `x/crypto` |
+| Magic link | `domain.MagicLinkService` | single-use, TTL, only the SHA-256 hash stored; Issue invalidates prior links for email+tenant |
+| Passkeys | `adapters/webauthn` | WebAuthn; HMAC-signed ceremony state (`StateKey`); kept an adapter so the core carries only `x/crypto` |
 | Workload keys | `domain.WorkloadKeyService` | scoped API keys for agent workers — 256-bit token (stdlib only), only the SHA-256 hash stored, `resource:action` scopes with `tools:*` wildcards, issue/validate/authorize/revoke; rotate atomic on the sql adapters (`AtomicRotator`) |
 | Basic auth | `middleware.BasicAuthMiddleware` | bootstrap-then-session handshake; `Basic` once, session cookie after — fits browser SPAs |
 
@@ -95,11 +95,12 @@ err = h.Verify(pw)
 cfg := domain.DefaultTOTPConfig("Klarlabs")
 secret, _ := domain.NewTOTPSecret()
 uri := cfg.ProvisioningURI(secret, email)   // → QR code
-_ = pgstore.NewTOTPRepo(db).SetSecret(ctx, uid, secret) // enroll; secret persisted via the port
+cipher, _ := aesgcm.New(totpKey)            // 32-byte deployment key
+_ = pgstore.NewTOTPRepo(db, cipher).SetSecret(ctx, uid, secret) // enroll; encrypted at rest
 err = cfg.Validate(secret, userCode, time.Now())
 
 ml := domain.NewMagicLinkService(pgstore.NewMagicLinkRepo(db), 15*time.Minute, nil)
-raw, _ := ml.Issue(ctx, emailVO, tid)  // email raw.String(); never stored
+raw, _ := ml.Issue(ctx, emailVO, tid)  // email raw.String(); prior links for email+tenant invalidated
 link, err := ml.Consume(ctx, raw)      // single-use
 
 // Workload keys: scoped, time-boxed API keys for agent workers.
@@ -134,10 +135,10 @@ http.Handle("/ui/", mw.Middleware(uiHandler))
 What the library guarantees, and where the deployment must meet it halfway:
 
 - **Secrets at rest.** Session tokens, magic links, and workload keys are stored
-  as SHA-256 hashes; passwords as argon2id. Only the TOTP shared secret is stored
-  recoverable (HOTP needs the raw secret to verify a code) — protect that column
-  with `WithCipher` (AES-GCM via `aesgcm`) or database column encryption / a
-  protected schema. Prefer wiring `WithCipher` in production.
+  as SHA-256 hashes; passwords as argon2id. The TOTP shared secret is the one
+  recoverable credential — `sqlite`/`pgstore` `NewTOTPRepo(db, cipher)` requires
+  an `aesgcm` (or other) `SecretCipher` so it is encrypted at rest. Use
+  `NewPlaintextTOTPRepo` only for tests or legacy migration.
 - **Session cookie vs Session.Token().** `Issue` / `Rotate` return a Session
   whose `Token()` is the raw cookie value. After `Validate`, `Token()` is empty
   — the raw bearer is not recoverable from storage. Revoke with the cookie
@@ -146,6 +147,8 @@ What the library guarantees, and where the deployment must meet it halfway:
 - **TOTP replay.** Use `TOTPService` (requires an `AtomicTOTPConsumer` repo —
   all first-party adapters). `TOTPConfig.Validate` remains available and is
   intentionally replay-prone within the skew window.
+- **Magic links.** `Issue` invalidates prior unconsumed links for the same
+  email+tenant so only the newly emailed token remains redeemable.
 - **Tenant isolation.** `UserRepository.GetUser` is tenant-scoped: a `UserID`
   belonging to another tenant reads as `ErrNotFound` even though IDs are globally
   unique. This is defense in depth *alongside*, not instead of, database
@@ -165,9 +168,10 @@ What the library guarantees, and where the deployment must meet it halfway:
 - **Input bounds.** Value-object constructors cap length (email 254, id/worker
   255, token 4096, password 1024, lockout key 255) so an unbounded
   attacker-controlled field can't be hashed or stored.
-- **Passkey ceremony state.** The WebAuthn `state` blob is unsigned JSON and
-  MUST stay server-side (never round-tripped through the client); see
-  `adapters/webauthn` package docs.
+- **Passkey ceremony state.** WebAuthn ceremony state is HMAC-SHA256-signed with
+  a required `Config.StateKey` (≥32 bytes), so a client cannot swap the UserID.
+  Still treat the blob as a secret single-use challenge; prefer server-side
+  storage. See `adapters/webauthn` package docs.
 
 ## Engineering bar
 

@@ -21,6 +21,15 @@ breaking changes bump the minor version).
   stateless checks.
 - **`Authenticator.Authenticate` takes `context.Context`**: credential I/O
   honors request cancellation/deadlines/trace.
+- **WebAuthn `Config.StateKey` is required** (≥32 bytes): ceremony state is
+  HMAC-SHA256-signed so a client-tampered UserID is rejected
+  (`ErrInvalidState`).
+- **`sqlite`/`pgstore` `NewTOTPRepo(db, cipher)` requires a cipher**: secrets
+  are encrypted at rest by default. Use `NewPlaintextTOTPRepo` only for tests
+  or legacy migration. `WithCipher` option removed.
+- **`MagicLinkRepository.InvalidateOutstanding`**: `Issue` invalidates prior
+  unconsumed links for the same email+tenant so only the newly emailed token
+  is live.
 
 ### Added
 

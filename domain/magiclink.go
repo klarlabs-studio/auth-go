@@ -92,4 +92,8 @@ type MagicLinkRepository interface {
 	// makes the single-use guarantee hold under concurrent redemption — the
 	// FindByHash/read-consumed check in the service alone cannot.
 	MarkConsumed(ctx context.Context, hash string) (bool, error)
+	// InvalidateOutstanding marks every unconsumed link for email+tenant as
+	// consumed so a newly issued link is the only live one. Called by
+	// MagicLinkService.Issue before Save.
+	InvalidateOutstanding(ctx context.Context, email Email, tenantID TenantID) error
 }

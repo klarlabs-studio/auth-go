@@ -190,6 +190,22 @@ func (r *MagicLinkRepo) MarkConsumed(ctx context.Context, hash string) (bool, er
 	return true, nil
 }
 
+// InvalidateOutstanding marks every unconsumed link for email+tenant consumed.
+func (r *MagicLinkRepo) InvalidateOutstanding(ctx context.Context, email domain.Email, tenantID domain.TenantID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for h, snap := range r.m {
+		if !snap.Consumed && snap.Email == email.String() && snap.TenantID == tenantID.String() {
+			snap.Consumed = true
+			r.m[h] = snap
+		}
+	}
+	return nil
+}
+
 // TOTPRepo is an in-memory domain.TOTPRepository.
 type TOTPRepo struct {
 	mu    sync.RWMutex

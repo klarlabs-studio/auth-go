@@ -199,35 +199,38 @@ func (r *MagicLinkRepo) MarkConsumed(ctx context.Context, hash string) (bool, er
 	return n > 0, nil
 }
 
-// TOTPRepo is a Postgres domain.TOTPRepository. By default the base32 secret is
-// stored verbatim; protect the column the way you protect any shared secret, or
-// pass WithCipher to have the adapter encrypt it at rest.
+// InvalidateOutstanding marks every unconsumed link for email+tenant consumed.
+func (r *MagicLinkRepo) InvalidateOutstanding(ctx context.Context, email domain.Email, tenantID domain.TenantID) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE authgo_magic_links SET consumed = TRUE
+		 WHERE email = $1 AND tenant_id = $2 AND consumed = FALSE`,
+		email.String(), tenantID.String(),
+	)
+	return err
+}
+
+// TOTPRepo is a Postgres domain.TOTPRepository. Secrets are encrypted at rest
+// when constructed with NewTOTPRepo (required SecretCipher). Use
+// NewPlaintextTOTPRepo only for tests or one-off migrations of legacy rows.
 type TOTPRepo struct {
 	db     DB
-	cipher domain.SecretCipher // nil = store the base32 secret verbatim
+	cipher domain.SecretCipher // nil = store the base32 secret verbatim (plaintext ctor only)
 }
 
-// TOTPOption configures a TOTPRepo at construction.
-type TOTPOption func(*TOTPRepo)
-
-// WithCipher stores the TOTP secret encrypted at rest, using c to seal it on
-// SetSecret and open it on GetSecret. The TOTP secret is the one auth-go
-// credential kept recoverable (RFC 6238 needs the raw secret), so it is the one
-// that benefits from a cipher. All rows are assumed to match the configured
-// cipher: adding, removing, or rotating the key requires re-encrypting existing
-// rows.
-func WithCipher(c domain.SecretCipher) TOTPOption {
-	return func(r *TOTPRepo) { r.cipher = c }
-}
-
-// NewTOTPRepo builds a TOTP secret repository over db. Pass WithCipher to
-// encrypt the secret at rest.
-func NewTOTPRepo(db DB, opts ...TOTPOption) *TOTPRepo {
-	r := &TOTPRepo{db: db}
-	for _, opt := range opts {
-		opt(r)
+// NewTOTPRepo builds a TOTP secret repository that encrypts secrets at rest
+// with cipher. cipher must be non-nil (use aesgcm.New from a deployment key).
+func NewTOTPRepo(db DB, cipher domain.SecretCipher) *TOTPRepo {
+	if cipher == nil {
+		panic("pgstore: NewTOTPRepo requires a non-nil SecretCipher; use NewPlaintextTOTPRepo for tests")
 	}
-	return r
+	return &TOTPRepo{db: db, cipher: cipher}
+}
+
+// NewPlaintextTOTPRepo stores the base32 secret verbatim. Prefer NewTOTPRepo
+// with aesgcm in any durable deployment — plaintext is for tests and legacy
+// migration only.
+func NewPlaintextTOTPRepo(db DB) *TOTPRepo {
+	return &TOTPRepo{db: db}
 }
 
 // encodeSecret renders a secret for storage: base64(ciphertext) when a cipher is
