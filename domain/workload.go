@@ -15,7 +15,7 @@ type WorkerID struct{ v string }
 
 // NewWorkerID validates and constructs a WorkerID.
 func NewWorkerID(s string) (WorkerID, error) {
-	if strings.TrimSpace(s) == "" {
+	if strings.TrimSpace(s) == "" || len(s) > maxWorkerIDLen {
 		return WorkerID{}, ErrInvalidWorkerID
 	}
 	return WorkerID{v: s}, nil

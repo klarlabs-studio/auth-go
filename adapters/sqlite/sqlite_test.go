@@ -245,6 +245,33 @@ func TestSessionRepo_DeleteScopedToUser(t *testing.T) {
 	}
 }
 
+func TestSessionRepo_RotateAtomically(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	repo := sqlite.NewSessionRepo(db)
+	now := time.Now().UTC().Truncate(time.Second)
+	svc := domain.NewSessionService(repo, time.Hour, func() time.Time { return now })
+
+	old, err := svc.Issue(ctx, uid(t, "u1"), tid(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := svc.Rotate(ctx, old.Token())
+	if err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	if _, err := svc.Validate(ctx, old.Token()); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("old survived atomic rotate: %v", err)
+	}
+	if _, err := svc.Validate(ctx, fresh.Token()); err != nil {
+		t.Fatalf("fresh invalid: %v", err)
+	}
+	absent, _ := domain.TokenFromString(strings.Repeat("a", 64))
+	if err := repo.RotateAtomically(ctx, absent, fresh); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("absent old key: want ErrNotFound, got %v", err)
+	}
+}
+
 func TestMagicLinkRepo(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
@@ -299,7 +326,7 @@ func mustEmail(t *testing.T) domain.Email {
 func TestTOTPRepo(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
-	repo := sqlite.NewTOTPRepo(db)
+	repo := sqlite.NewPlaintextTOTPRepo(db)
 	u := uid(t, "u1")
 
 	if _, err := repo.GetSecret(ctx, u); !errors.Is(err, domain.ErrNotFound) {
@@ -348,7 +375,7 @@ func TestTOTPRepo(t *testing.T) {
 func TestTOTPRepo_ConsumeStep(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
-	repo := sqlite.NewTOTPRepo(db)
+	repo := sqlite.NewPlaintextTOTPRepo(db)
 	u := uid(t, "u1")
 
 	cases := []struct {
@@ -373,10 +400,10 @@ func TestTOTPRepo_ConsumeStep(t *testing.T) {
 	}
 }
 
-// TestTOTPRepo_WithCipher proves the WithCipher option encrypts the secret at
-// rest: the stored column is neither the base32 secret nor readable, yet
-// GetSecret round-trips it back through the cipher.
-func TestTOTPRepo_WithCipher(t *testing.T) {
+// TestTOTPRepo_EncryptsAtRest proves NewTOTPRepo encrypts the secret at rest:
+// the stored column is neither the base32 secret nor readable without the
+// cipher, yet GetSecret round-trips it back.
+func TestTOTPRepo_EncryptsAtRest(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
 	u := uid(t, "u1")
@@ -389,7 +416,7 @@ func TestTOTPRepo_WithCipher(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	repo := sqlite.NewTOTPRepo(db, sqlite.WithCipher(cipher))
+	repo := sqlite.NewTOTPRepo(db, cipher)
 
 	secret, err := domain.NewTOTPSecret()
 	if err != nil {
@@ -407,7 +434,7 @@ func TestTOTPRepo_WithCipher(t *testing.T) {
 		t.Fatalf("read column: %v", err)
 	}
 	if strings.Contains(stored, secret.String()) {
-		t.Fatal("secret stored in plaintext despite WithCipher")
+		t.Fatal("secret stored in plaintext despite cipher")
 	}
 
 	// GetSecret decrypts back to the original.
@@ -419,8 +446,8 @@ func TestTOTPRepo_WithCipher(t *testing.T) {
 		t.Fatalf("round-trip mismatch: %q vs %q", got.String(), secret.String())
 	}
 
-	// A repo without the cipher can't read an encrypted secret back as valid.
-	plainRepo := sqlite.NewTOTPRepo(db)
+	// A plaintext repo can't read an encrypted secret back as valid.
+	plainRepo := sqlite.NewPlaintextTOTPRepo(db)
 	if got, err := plainRepo.GetSecret(ctx, u); err == nil && got.String() == secret.String() {
 		t.Fatal("plaintext repo recovered an encrypted secret")
 	}

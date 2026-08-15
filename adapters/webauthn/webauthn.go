@@ -7,8 +7,12 @@ package webauthn
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/klarlabs-studio/auth-go/domain"
@@ -29,37 +33,48 @@ var ErrNoPasskeys = errors.New("authgo/webauthn: user has no passkeys")
 // left untouched.
 var ErrCredentialCloned = errors.New("authgo/webauthn: credential sign count regressed; authenticator may be cloned")
 
+// ErrInvalidStateKey is returned by New when Config.StateKey is missing or
+// shorter than StateKeyMinBytes.
+var ErrInvalidStateKey = errors.New("authgo/webauthn: StateKey must be at least 32 bytes")
+
+// ErrInvalidState is returned by Finish* when the ceremony state blob is
+// malformed or its HMAC does not verify — e.g. a client-tampered UserID.
+var ErrInvalidState = errors.New("authgo/webauthn: invalid or tampered ceremony state")
+
 // defaultCeremonyTimeout bounds how long a registration or login ceremony may
 // stay outstanding before its challenge expires. It is enforced server-side
 // (see New) so a stale challenge cannot be replayed indefinitely.
 const (
 	defaultCeremonyTimeout    = 5 * time.Minute
 	defaultCeremonyTimeoutUVD = 2 * time.Minute // user-verification "discouraged"
+	StateKeyMinBytes          = 32
 )
 
-// Ceremony state security requirement
+// Ceremony state
 //
-// The opaque `state` blob returned by BeginRegistration and BeginLogin is the
-// serialized WebAuthn session: it carries the ceremony challenge AND the
-// UserID, and Finish* trusts the UserID it reads back out of that blob. The
-// blob is NOT integrity-protected (it is plain JSON, neither signed nor
-// encrypted).
+// BeginRegistration / BeginLogin return an opaque state blob that carries the
+// ceremony challenge AND the UserID. Finish* trusts the UserID it reads back
+// out of that blob. The blob is HMAC-SHA256-signed with Config.StateKey so a
+// client cannot substitute another UserID (or otherwise tamper with the
+// session) even if the state is round-tripped through the browser.
 //
-// It MUST therefore be:
-//   - stored server-side (e.g. in the session store keyed by the browser
-//     session), never round-tripped through the client;
-//   - kept secret (it contains the live challenge);
-//   - used exactly once (delete it as soon as Finish* is called, whether or
-//     not it succeeds).
-//
-// If the state is ever accepted back from the client unsigned, an attacker can
-// substitute an arbitrary UserID and complete a ceremony as another user.
+// Still:
+//   - treat the blob as a secret (it contains the live challenge);
+//   - use it exactly once (delete it as soon as Finish* is called, whether or
+//     not it succeeds);
+//   - prefer server-side storage; the MAC makes client round-trip safe against
+//     tampering, not against challenge disclosure.
 
 // Config configures the relying party (your app).
 type Config struct {
 	RPDisplayName string   // "Klarlabs"
 	RPID          string   // registrable domain, "klarlabs.de"
 	RPOrigins     []string // allowed origins, "https://app.klarlabs.de"
+
+	// StateKey integrity-protects ceremony state (HMAC-SHA256). Required; must
+	// be at least StateKeyMinBytes. Source it from a KMS or sealed secret —
+	// never commit it. Rotating the key invalidates in-flight ceremonies.
+	StateKey []byte
 
 	// UserVerification controls whether the authenticator must verify the user
 	// (biometric, PIN, ...) — not merely confirm presence — during login and
@@ -75,14 +90,18 @@ type Config struct {
 // Authenticator implements domain.PasskeyAuthenticator over go-webauthn,
 // loading a user's existing credentials from a domain.PasskeyRepository.
 type Authenticator struct {
-	wa   *webauthn.WebAuthn
-	repo domain.PasskeyRepository
-	uv   protocol.UserVerificationRequirement
+	wa       *webauthn.WebAuthn
+	repo     domain.PasskeyRepository
+	uv       protocol.UserVerificationRequirement
+	stateKey []byte
 }
 
 // New builds an Authenticator. The repository supplies a user's existing
-// credentials during login ceremonies.
+// credentials during login ceremonies. Config.StateKey is required.
 func New(cfg Config, repo domain.PasskeyRepository) (*Authenticator, error) {
+	if len(cfg.StateKey) < StateKeyMinBytes {
+		return nil, ErrInvalidStateKey
+	}
 	uv := cfg.UserVerification
 	if uv == "" {
 		uv = protocol.VerificationRequired
@@ -107,7 +126,9 @@ func New(cfg Config, repo domain.PasskeyRepository) (*Authenticator, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Authenticator{wa: wa, repo: repo, uv: uv}, nil
+	key := make([]byte, len(cfg.StateKey))
+	copy(key, cfg.StateKey)
+	return &Authenticator{wa: wa, repo: repo, uv: uv, stateKey: key}, nil
 }
 
 // waUser adapts a domain user + its stored credentials to webauthn.User.
@@ -144,12 +165,7 @@ func (a *Authenticator) loadUser(ctx context.Context, userID domain.UserID, disp
 }
 
 // BeginRegistration starts enrolling a new passkey, returning JSON options for
-// navigator.credentials.create and opaque state.
-//
-// SECURITY: the returned state is a secret, single-use, integrity-unprotected
-// session blob (challenge + UserID). It MUST be stored server-side and never
-// round-tripped through the client. See the "Ceremony state security
-// requirement" note above.
+// navigator.credentials.create and HMAC-signed opaque state.
 func (a *Authenticator) BeginRegistration(ctx context.Context, userID domain.UserID, displayName string) (options, state []byte, err error) {
 	user, err := a.loadUser(ctx, userID, displayName)
 	if err != nil {
@@ -163,7 +179,7 @@ func (a *Authenticator) BeginRegistration(ctx context.Context, userID domain.Use
 	if err != nil {
 		return nil, nil, err
 	}
-	return marshalPair(creation, session)
+	return a.marshalPair(creation, session)
 }
 
 // FinishRegistration verifies the browser response and returns the credential
@@ -172,13 +188,10 @@ func (a *Authenticator) BeginRegistration(ctx context.Context, userID domain.Use
 // uniform; this step does no storage I/O (it only verifies the browser
 // response), so ctx is currently unused here.
 //
-// SECURITY: state must be the exact blob produced by BeginRegistration, read
-// from trusted server-side storage and used once. It is not integrity-
-// protected — the UserID is trusted verbatim — so it must never be accepted
-// from the client. See the "Ceremony state security requirement" note above.
+// state must be a blob produced by BeginRegistration (HMAC verified).
 func (a *Authenticator) FinishRegistration(_ context.Context, state, response []byte) (domain.PasskeyCredential, error) {
 	var session webauthn.SessionData
-	if err := json.Unmarshal(state, &session); err != nil {
+	if err := a.openState(state, &session); err != nil {
 		return domain.PasskeyCredential{}, err
 	}
 	parsed, err := protocol.ParseCredentialCreationResponseBody(bytes.NewReader(response))
@@ -202,12 +215,8 @@ func (a *Authenticator) FinishRegistration(_ context.Context, state, response []
 	}, nil
 }
 
-// BeginLogin starts an assertion for a user's known credentials.
-//
-// SECURITY: the returned state is a secret, single-use, integrity-unprotected
-// session blob (challenge + UserID). It MUST be stored server-side and never
-// round-tripped through the client. See the "Ceremony state security
-// requirement" note above.
+// BeginLogin starts an assertion for a user's known credentials, returning
+// JSON options and HMAC-signed opaque state.
 func (a *Authenticator) BeginLogin(ctx context.Context, userID domain.UserID) (options, state []byte, err error) {
 	user, err := a.loadUser(ctx, userID, "")
 	if err != nil {
@@ -222,7 +231,7 @@ func (a *Authenticator) BeginLogin(ctx context.Context, userID domain.UserID) (o
 	if err != nil {
 		return nil, nil, err
 	}
-	return marshalPair(assertion, session)
+	return a.marshalPair(assertion, session)
 }
 
 // FinishLogin verifies the assertion, advances the stored sign count, and
@@ -230,13 +239,10 @@ func (a *Authenticator) BeginLogin(ctx context.Context, userID domain.UserID) (o
 // counter did not advance it returns ErrCredentialCloned and leaves the stored
 // sign count unchanged.
 //
-// SECURITY: state must be the exact blob produced by BeginLogin, read from
-// trusted server-side storage and used once. It is not integrity-protected —
-// the UserID is trusted verbatim — so it must never be accepted from the
-// client. See the "Ceremony state security requirement" note above.
+// state must be a blob produced by BeginLogin (HMAC verified).
 func (a *Authenticator) FinishLogin(ctx context.Context, state, response []byte) (credentialID []byte, err error) {
 	var session webauthn.SessionData
-	if err := json.Unmarshal(state, &session); err != nil {
+	if err := a.openState(state, &session); err != nil {
 		return nil, err
 	}
 	uid, err := domain.NewUserID(string(session.UserID))
@@ -267,16 +273,55 @@ func (a *Authenticator) FinishLogin(ctx context.Context, state, response []byte)
 	return cred.ID, nil
 }
 
-func marshalPair(options, state any) ([]byte, []byte, error) {
+func (a *Authenticator) marshalPair(options, session any) ([]byte, []byte, error) {
 	o, err := json.Marshal(options)
 	if err != nil {
 		return nil, nil, err
 	}
-	s, err := json.Marshal(state)
+	s, err := a.sealState(session)
 	if err != nil {
 		return nil, nil, err
 	}
 	return o, s, nil
+}
+
+// sealState JSON-encodes session and returns "b64url(payload).b64url(mac)".
+func (a *Authenticator) sealState(session any) ([]byte, error) {
+	raw, err := json.Marshal(session)
+	if err != nil {
+		return nil, err
+	}
+	mac := hmac.New(sha256.New, a.stateKey)
+	_, _ = mac.Write(raw)
+	sum := mac.Sum(nil)
+	enc := base64.RawURLEncoding
+	return []byte(enc.EncodeToString(raw) + "." + enc.EncodeToString(sum)), nil
+}
+
+// openState verifies the HMAC on a sealState blob and unmarshals the payload.
+func (a *Authenticator) openState(state []byte, dest any) error {
+	parts := strings.Split(string(state), ".")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return ErrInvalidState
+	}
+	enc := base64.RawURLEncoding
+	raw, err := enc.DecodeString(parts[0])
+	if err != nil {
+		return ErrInvalidState
+	}
+	want, err := enc.DecodeString(parts[1])
+	if err != nil {
+		return ErrInvalidState
+	}
+	mac := hmac.New(sha256.New, a.stateKey)
+	_, _ = mac.Write(raw)
+	if !hmac.Equal(mac.Sum(nil), want) {
+		return ErrInvalidState
+	}
+	if err := json.Unmarshal(raw, dest); err != nil {
+		return ErrInvalidState
+	}
+	return nil
 }
 
 var _ domain.PasskeyAuthenticator = (*Authenticator)(nil)

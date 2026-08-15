@@ -7,6 +7,46 @@ breaking changes bump the minor version).
 
 ## [Unreleased]
 
+### Changed (breaking)
+
+- **`Session.Token()` after Validate is empty**: hydrated sessions no longer
+  put the at-rest hash in `Token()`. The raw cookie value is only present on
+  the Issue/Rotate success path. `Revoke(sess.Token())` after Validate now
+  returns `ErrInvalidToken` instead of silently hashing-the-hash. Use the
+  request cookie (or `middleware.BasicAuthMiddleware.Logout`) to revoke.
+- **`NewTOTPService` requires `AtomicTOTPConsumer`**: repositories that cannot
+  consume time steps fail at construction with `ErrTOTPNoReplayProtection`
+  instead of verifying with silent replay. First-party adapters already
+  implement the capability; use `TOTPConfig.Validate` for intentional
+  stateless checks.
+- **`Authenticator.Authenticate` takes `context.Context`**: credential I/O
+  honors request cancellation/deadlines/trace.
+- **WebAuthn `Config.StateKey` is required** (≥32 bytes): ceremony state is
+  HMAC-SHA256-signed so a client-tampered UserID is rejected
+  (`ErrInvalidState`).
+- **`sqlite`/`pgstore` `NewTOTPRepo(db, cipher)` requires a cipher**: secrets
+  are encrypted at rest by default. Use `NewPlaintextTOTPRepo` only for tests
+  or legacy migration. `WithCipher` option removed.
+- **`MagicLinkRepository.InvalidateOutstanding`**: `Issue` invalidates prior
+  unconsumed links for the same email+tenant so only the newly emailed token
+  is live.
+
+### Added
+
+- `AtomicSessionRotator` port; memory/sqlite/pgstore session repos implement
+  it so `SessionService.Rotate` swaps in one atomic step.
+- `LockoutKeyFromEmail` helper (SHA-256 hex) so lockout keys need not store
+  plaintext email.
+- Password plaintext length bound (1024) and `Argon2idParams.Validate`;
+  `WorkerID` / lockout key length caps (255).
+- `middleware.BasicAuthMiddleware.Logout` — revoke from cookie + clear.
+- gosec enabled in `.golangci.yml`.
+
+### Fixed
+
+- Basic auth `Realm` rejects `"` / `\` / controls that break
+  `WWW-Authenticate`.
+
 ## [0.6.0] - 2026-07-05
 
 A security-hardening release closing every finding from a full deep review. The

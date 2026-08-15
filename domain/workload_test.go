@@ -32,7 +32,7 @@ func mustScope(t *testing.T, actions ...string) domain.Scope {
 // ── WorkerID ────────────────────────────────────────────────
 
 func TestWorkerID_Validation(t *testing.T) {
-	for _, bad := range []string{"", "  "} {
+	for _, bad := range []string{"", "  ", strings.Repeat("w", 256)} {
 		if _, err := domain.NewWorkerID(bad); !errors.Is(err, domain.ErrInvalidWorkerID) {
 			t.Fatalf("NewWorkerID(%q): want ErrInvalidWorkerID, got %v", bad, err)
 		}
@@ -43,6 +43,9 @@ func TestWorkerID_Validation(t *testing.T) {
 	}
 	if (domain.WorkerID{}).IsZero() != true {
 		t.Fatal("zero WorkerID must be zero")
+	}
+	if _, err := domain.NewWorkerID(strings.Repeat("w", 255)); err != nil {
+		t.Fatalf("255-char WorkerID: %v", err)
 	}
 }
 

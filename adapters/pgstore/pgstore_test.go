@@ -174,7 +174,7 @@ func TestMagicLinkRepo_Integration(t *testing.T) {
 func TestTOTPRepo_Integration(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
-	repo := pgstore.NewTOTPRepo(db)
+	repo := pgstore.NewPlaintextTOTPRepo(db)
 	u := uid(t, "u1")
 
 	if _, err := repo.GetSecret(ctx, u); !errors.Is(err, domain.ErrNotFound) {

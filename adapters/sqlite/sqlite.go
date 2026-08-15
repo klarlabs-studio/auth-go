@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"errors"
+	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -124,6 +126,41 @@ func (r *SessionRepo) DeleteByUser(ctx context.Context, userID domain.UserID) er
 	return err
 }
 
+// RotateAtomically implements domain.AtomicSessionRotator: delete oldKey and
+// insert newSess in a single transaction (or directly when already inside a Tx).
+func (r *SessionRepo) RotateAtomically(ctx context.Context, oldKey domain.Token, newSess domain.Session) error {
+	beginner, ok := r.db.(txBeginner)
+	if !ok {
+		return sessionRotateSwap(ctx, r.db, oldKey, newSess)
+	}
+	tx, err := beginner.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if err := sessionRotateSwap(ctx, tx, oldKey, newSess); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+func sessionRotateSwap(ctx context.Context, db DB, oldKey domain.Token, newSess domain.Session) error {
+	res, err := db.ExecContext(ctx, `DELETE FROM authgo_sessions WHERE token = ?`, oldKey.String())
+	if err != nil {
+		return err
+	}
+	if err := requireOneRow(res); err != nil {
+		return err
+	}
+	snap := newSess.Snapshot()
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO authgo_sessions (token, user_id, tenant_id, created_at, expires_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		snap.Token, snap.UserID, snap.TenantID, encodeTime(snap.CreatedAt), encodeTime(snap.ExpiresAt),
+	)
+	return err
+}
+
 // MagicLinkRepo is a SQLite domain.MagicLinkRepository.
 type MagicLinkRepo struct{ db DB }
 
@@ -180,35 +217,38 @@ func (r *MagicLinkRepo) MarkConsumed(ctx context.Context, hash string) (bool, er
 	return n > 0, nil
 }
 
-// TOTPRepo is a SQLite domain.TOTPRepository. By default the base32 secret is
-// stored verbatim; protect the column the way you protect any shared secret, or
-// pass WithCipher to have the adapter encrypt it at rest.
+// InvalidateOutstanding marks every unconsumed link for email+tenant consumed.
+func (r *MagicLinkRepo) InvalidateOutstanding(ctx context.Context, email domain.Email, tenantID domain.TenantID) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE authgo_magic_links SET consumed = 1
+		 WHERE email = ? AND tenant_id = ? AND consumed = 0`,
+		email.String(), tenantID.String(),
+	)
+	return err
+}
+
+// TOTPRepo is a SQLite domain.TOTPRepository. Secrets are encrypted at rest
+// when constructed with NewTOTPRepo (required SecretCipher). Use
+// NewPlaintextTOTPRepo only for tests or one-off migrations of legacy rows.
 type TOTPRepo struct {
 	db     DB
-	cipher domain.SecretCipher // nil = store the base32 secret verbatim
+	cipher domain.SecretCipher // nil = store the base32 secret verbatim (plaintext ctor only)
 }
 
-// TOTPOption configures a TOTPRepo at construction.
-type TOTPOption func(*TOTPRepo)
-
-// WithCipher stores the TOTP secret encrypted at rest, using c to seal it on
-// SetSecret and open it on GetSecret. The TOTP secret is the one auth-go
-// credential kept recoverable (RFC 6238 needs the raw secret), so it is the one
-// that benefits from a cipher. All rows are assumed to match the configured
-// cipher: adding, removing, or rotating the key requires re-encrypting existing
-// rows.
-func WithCipher(c domain.SecretCipher) TOTPOption {
-	return func(r *TOTPRepo) { r.cipher = c }
-}
-
-// NewTOTPRepo builds a TOTP secret repository over db. Pass WithCipher to
-// encrypt the secret at rest.
-func NewTOTPRepo(db DB, opts ...TOTPOption) *TOTPRepo {
-	r := &TOTPRepo{db: db}
-	for _, opt := range opts {
-		opt(r)
+// NewTOTPRepo builds a TOTP secret repository that encrypts secrets at rest
+// with cipher. cipher must be non-nil (use aesgcm.New from a deployment key).
+func NewTOTPRepo(db DB, cipher domain.SecretCipher) *TOTPRepo {
+	if cipher == nil {
+		panic("sqlite: NewTOTPRepo requires a non-nil SecretCipher; use NewPlaintextTOTPRepo for tests")
 	}
-	return r
+	return &TOTPRepo{db: db, cipher: cipher}
+}
+
+// NewPlaintextTOTPRepo stores the base32 secret verbatim. Prefer NewTOTPRepo
+// with aesgcm in any durable deployment — plaintext is for tests and legacy
+// migration only.
+func NewPlaintextTOTPRepo(db DB) *TOTPRepo {
+	return &TOTPRepo{db: db}
 }
 
 // encodeSecret renders a secret for storage: base64(ciphertext) when a cipher is
@@ -340,8 +380,12 @@ func (r *PasskeyRepo) ListByUser(ctx context.Context, userID domain.UserID) ([]d
 		if err != nil {
 			return nil, err
 		}
+		sc, err := uint32SignCount(count)
+		if err != nil {
+			return nil, err
+		}
 		out = append(out, domain.PasskeyCredential{
-			ID: id, UserID: u, PublicKey: pub, SignCount: uint32(count), Name: name,
+			ID: id, UserID: u, PublicKey: pub, SignCount: sc, Name: name,
 		})
 	}
 	return out, rows.Err()
@@ -627,6 +671,15 @@ func requireOneRow(res sql.Result) error {
 		return domain.ErrNotFound
 	}
 	return nil
+}
+
+// uint32SignCount converts a scanned INTEGER sign_count into the WebAuthn
+// uint32 counter, rejecting values outside the type's range.
+func uint32SignCount(count int64) (uint32, error) {
+	if count < 0 || count > math.MaxUint32 {
+		return 0, fmt.Errorf("sqlite: sign_count out of range: %d", count)
+	}
+	return uint32(count), nil
 }
 
 // boolToInt encodes a Go bool as SQLite's 0/1 integer boolean.

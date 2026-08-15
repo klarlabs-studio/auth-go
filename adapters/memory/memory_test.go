@@ -436,3 +436,71 @@ func TestWorkloadKeyRepo_ConcurrentRotate(t *testing.T) {
 		t.Fatalf("after concurrent rotate: want %d keys, got %d", n, len(left))
 	}
 }
+
+func TestSessionRepo_RotateAtomically(t *testing.T) {
+	ctx := context.Background()
+	repo := memory.NewSessionRepo()
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	svc := domain.NewSessionService(repo, time.Hour, func() time.Time { return now })
+
+	old, err := svc.Issue(ctx, uid(t, "u1"), tid(t, "t1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := svc.Rotate(ctx, old.Token())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Validate(ctx, old.Token()); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("old survived: %v", err)
+	}
+	if _, err := svc.Validate(ctx, fresh.Token()); err != nil {
+		t.Fatal(err)
+	}
+	absent, _ := domain.TokenFromString("nope")
+	if err := repo.RotateAtomically(ctx, absent, fresh); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("absent: want ErrNotFound, got %v", err)
+	}
+}
+
+func TestTOTPRepo_ConsumeStep(t *testing.T) {
+	ctx := context.Background()
+	repo := memory.NewTOTPRepo()
+	u := uid(t, "u1")
+	fresh, err := repo.ConsumeStep(ctx, u, 100)
+	if err != nil || !fresh {
+		t.Fatalf("first step: fresh=%v err=%v", fresh, err)
+	}
+	again, err := repo.ConsumeStep(ctx, u, 100)
+	if err != nil || again {
+		t.Fatalf("replay: fresh=%v err=%v", again, err)
+	}
+	next, err := repo.ConsumeStep(ctx, u, 101)
+	if err != nil || !next {
+		t.Fatalf("advance: fresh=%v err=%v", next, err)
+	}
+}
+
+func TestLoginAttemptRepo_RecordFailureAtomically(t *testing.T) {
+	ctx := context.Background()
+	repo := memory.NewLoginAttemptRepo()
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	var justLocked bool
+	var err error
+	for i := 0; i < 5; i++ {
+		_, justLocked, err = repo.RecordFailureAtomically(ctx, "k", now, 5, 15*time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !justLocked {
+		t.Fatal("5th failure should engage the lock")
+	}
+	snap, _, err := repo.RecordFailureAtomically(ctx, "k", now.Add(time.Hour), 5, 15*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.FailureCount != 1 {
+		t.Fatalf("expired lock should reset count, got %d", snap.FailureCount)
+	}
+}

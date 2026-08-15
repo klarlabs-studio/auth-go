@@ -14,9 +14,12 @@ var (
 	ErrConsumed = errors.New("authgo: already consumed")
 
 	// Credential errors.
-	ErrPasswordMismatch = errors.New("authgo: password mismatch")
-	ErrInvalidTOTP      = errors.New("authgo: invalid TOTP code")
-	ErrTOTPReused       = errors.New("authgo: TOTP code already used")
+	ErrPasswordMismatch       = errors.New("authgo: password mismatch")
+	ErrInvalidPassword        = errors.New("authgo: invalid password")
+	ErrInvalidArgon2Params    = errors.New("authgo: invalid argon2id params")
+	ErrInvalidTOTP            = errors.New("authgo: invalid TOTP code")
+	ErrTOTPReused             = errors.New("authgo: TOTP code already used")
+	ErrTOTPNoReplayProtection = errors.New("authgo: TOTP repository does not support replay protection")
 
 	// Lockout errors.
 	ErrAccountLocked     = errors.New("authgo: account locked")

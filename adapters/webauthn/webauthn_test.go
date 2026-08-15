@@ -1,7 +1,9 @@
 package webauthn_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -21,6 +23,7 @@ func newAuth(t *testing.T) (*webauthn.Authenticator, *memory.PasskeyRepo) {
 		RPDisplayName: "Klarlabs",
 		RPID:          "klarlabs.de",
 		RPOrigins:     []string{"https://app.klarlabs.de"},
+		StateKey:      bytes.Repeat([]byte{0x42}, webauthn.StateKeyMinBytes),
 	}, repo)
 	if err != nil {
 		t.Fatalf("new: %v", err)
@@ -35,6 +38,22 @@ func mustUser(t *testing.T, s string) domain.UserID {
 		t.Fatal(err)
 	}
 	return id
+}
+
+// decodeStatePayload extracts the JSON session from an HMAC-sealed state blob
+// without verifying the MAC (tests that need the payload shape).
+func decodeStatePayload(t *testing.T, state []byte) []byte {
+	t.Helper()
+	parts := bytes.Split(state, []byte("."))
+	if len(parts) != 2 {
+		t.Fatalf("state not sealed: %q", state)
+	}
+	raw := make([]byte, base64.RawURLEncoding.DecodedLen(len(parts[0])))
+	n, err := base64.RawURLEncoding.Decode(raw, parts[0])
+	if err != nil {
+		t.Fatalf("payload b64: %v", err)
+	}
+	return raw[:n]
 }
 
 func TestBeginRegistration_ValidOptions(t *testing.T) {
@@ -157,6 +176,7 @@ func TestConfig_UserVerificationOverride(t *testing.T) {
 		RPDisplayName:    "Klarlabs",
 		RPID:             "klarlabs.de",
 		RPOrigins:        []string{"https://app.klarlabs.de"},
+		StateKey:         bytes.Repeat([]byte{0x7}, webauthn.StateKeyMinBytes),
 		UserVerification: protocol.VerificationDiscouraged,
 	}, repo)
 	if err != nil {
@@ -190,14 +210,46 @@ func TestBeginLogin_ChallengeExpirySet(t *testing.T) {
 	var session struct {
 		Expires time.Time `json:"expires"`
 	}
-	if err := json.Unmarshal(state, &session); err != nil {
-		t.Fatalf("state invalid JSON: %v", err)
+	if err := json.Unmarshal(decodeStatePayload(t, state), &session); err != nil {
+		t.Fatalf("state payload invalid JSON: %v", err)
 	}
 	if session.Expires.IsZero() {
 		t.Fatal("session Expires is zero: challenge expiry not enforced")
 	}
 	if !session.Expires.After(time.Now()) {
 		t.Fatalf("session Expires %v is not in the future", session.Expires)
+	}
+}
+
+func TestNew_RequiresStateKey(t *testing.T) {
+	repo := memory.NewPasskeyRepo()
+	_, err := webauthn.New(webauthn.Config{
+		RPDisplayName: "Klarlabs",
+		RPID:          "klarlabs.de",
+		RPOrigins:     []string{"https://app.klarlabs.de"},
+		StateKey:      bytes.Repeat([]byte{1}, 16),
+	}, repo)
+	if !errors.Is(err, webauthn.ErrInvalidStateKey) {
+		t.Fatalf("want ErrInvalidStateKey, got %v", err)
+	}
+}
+
+func TestFinish_RejectsTamperedState(t *testing.T) {
+	ctx := context.Background()
+	a, _ := newAuth(t)
+	_, state, err := a.BeginRegistration(ctx, mustUser(t, "u-tamper"), "Felix")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Flip a byte in the payload segment so the MAC no longer matches.
+	parts := bytes.Split(state, []byte("."))
+	parts[0][0] ^= 0xff
+	tampered := bytes.Join(parts, []byte("."))
+	if _, err := a.FinishRegistration(ctx, tampered, []byte(`{}`)); !errors.Is(err, webauthn.ErrInvalidState) {
+		t.Fatalf("want ErrInvalidState, got %v", err)
+	}
+	if _, err := a.FinishLogin(ctx, tampered, []byte(`{}`)); !errors.Is(err, webauthn.ErrInvalidState) {
+		t.Fatalf("login: want ErrInvalidState, got %v", err)
 	}
 }
 

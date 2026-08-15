@@ -20,10 +20,12 @@ import (
 // rule. The caps are deliberately generous: real identifiers, addresses, and
 // tokens sit far below them.
 const (
-	maxUserIDLen   = 255  // product-chosen key (UUID/ULID/external id)
-	maxTenantIDLen = 255  // product-chosen key
-	maxEmailLen    = 254  // RFC 5321 §4.5.3.1.3 maximum path length
-	maxTokenLen    = 4096 // >> a 43-char base64 token; a browser cookie cap
+	maxUserIDLen     = 255  // product-chosen key (UUID/ULID/external id)
+	maxTenantIDLen   = 255  // product-chosen key
+	maxWorkerIDLen   = 255  // product-chosen worker principal key
+	maxEmailLen      = 254  // RFC 5321 §4.5.3.1.3 maximum path length
+	maxTokenLen      = 4096 // >> a 43-char base64 token; a browser cookie cap
+	maxLockoutKeyLen = 255  // opaque lockout key (e.g. SHA-256 hex is 64)
 )
 
 // UserID identifies a user within a tenant. Opaque, non-empty.
