@@ -407,10 +407,10 @@ func (s *WorkloadKeyService) ListKeys(ctx context.Context, workerID WorkerID) ([
 // RotateKey issues a replacement key — same worker, scope, and expiry — and
 // invalidates the old one, returning the new APIKey and its RAW token.
 //
-// If the store implements AtomicRotator (the sqlite and pgstore adapters do),
-// the swap runs in a single transaction: the old key is deleted and the new key
-// inserted atomically, so there is never a window where both keys are live and
-// no crash can leave the old key dangling.
+// If the store implements AtomicRotator (memory, sqlite, and pgstore do),
+// the swap runs in a single transaction (or mutex hold): the old key is deleted
+// and the new key inserted atomically, so there is never a window where both
+// keys are live and no crash can leave the old key dangling.
 //
 // Otherwise it falls back to a create-then-delete path: it creates the new key
 // first, then deletes the old one, so the two keys briefly OVERLAP (both valid)
