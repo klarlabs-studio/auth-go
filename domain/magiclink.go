@@ -94,6 +94,17 @@ type MagicLinkRepository interface {
 	MarkConsumed(ctx context.Context, hash string) (bool, error)
 	// InvalidateOutstanding marks every unconsumed link for email+tenant as
 	// consumed so a newly issued link is the only live one. Called by
-	// MagicLinkService.Issue before Save.
+	// MagicLinkService.Issue before Save (or as part of IssueAtomically).
 	InvalidateOutstanding(ctx context.Context, email Email, tenantID TenantID) error
+}
+
+// AtomicMagicLinkIssuer is an optional MagicLinkRepository capability: invalidate
+// outstanding links for email+tenant and insert the new link in one atomic
+// step. MagicLinkService.Issue prefers it when available so a crash between
+// invalidate and save cannot leave the account with no live link (or both old
+// and new briefly inconsistent across replicas). memory/sqlite/pgstore implement it.
+type AtomicMagicLinkIssuer interface {
+	// IssueAtomically marks unconsumed links for link.Email()+TenantID consumed
+	// and Saves link in one atomic operation.
+	IssueAtomically(ctx context.Context, link MagicLink) error
 }

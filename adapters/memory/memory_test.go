@@ -164,6 +164,79 @@ func TestMagicLinkRepo(t *testing.T) {
 	}
 }
 
+// TestMagicLinkRepo_SaveAndInvalidateOutstanding exercises the non-atomic port
+// methods directly — Issue uses IssueAtomically, so these would otherwise stay
+// at 0% coverage and trip the memory coverctl bar under -race.
+func TestMagicLinkRepo_SaveAndInvalidateOutstanding(t *testing.T) {
+	ctx := context.Background()
+	repo := memory.NewMagicLinkRepo()
+	em := email(t, "a@b.co")
+	tn := tid(t, "t1")
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+
+	raw, err := domain.NewToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := domain.MagicLinkFromSnapshot(domain.MagicLinkSnapshot{
+		Hash: domain.HashToken(raw), Email: em.String(), TenantID: tn.String(),
+		ExpiresAt: now.Add(time.Hour),
+	})
+	if err := repo.Save(ctx, link); err != nil {
+		t.Fatal(err)
+	}
+	got, err := repo.FindByHash(ctx, domain.HashToken(raw))
+	if err != nil || got.Consumed() {
+		t.Fatalf("find: %v consumed=%v", err, got.Consumed())
+	}
+	if err := repo.InvalidateOutstanding(ctx, em, tn); err != nil {
+		t.Fatal(err)
+	}
+	got, err = repo.FindByHash(ctx, domain.HashToken(raw))
+	if err != nil || !got.Consumed() {
+		t.Fatalf("after invalidate: consumed=%v err=%v", got.Consumed(), err)
+	}
+	if _, err := repo.FindByHash(ctx, "missing"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("missing hash: want ErrNotFound, got %v", err)
+	}
+}
+
+func TestWorkloadKeyRepo_RotateAtomicallyConflicts(t *testing.T) {
+	ctx := context.Background()
+	repo := memory.NewWorkloadKeyRepo()
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	svc := domain.NewWorkloadKeyService(repo, func() time.Time { return now })
+	w := wid(t, "agent-c")
+
+	a, _, err := svc.IssueKey(ctx, domain.KeyRequest{
+		WorkerID: w, Scope: scope(t, "tools:*"), ExpiresAt: now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _, err := svc.IssueKey(ctx, domain.KeyRequest{
+		WorkerID: w, Scope: scope(t, "tools:*"), ExpiresAt: now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Rotating a→b's ID collides.
+	collide := domain.APIKeyFromSnapshot(domain.APIKeySnapshot{
+		ID: b.ID().String(), Hash: "deadbeef", WorkerID: w.String(),
+		Scope: []string{"tools:*"}, ExpiresAt: now.Add(time.Hour), CreatedAt: now,
+	})
+	if err := repo.RotateAtomically(ctx, a.ID(), collide); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("id collide: want ErrConflict, got %v", err)
+	}
+	hashCollide := domain.APIKeyFromSnapshot(domain.APIKeySnapshot{
+		ID: "wk_new", Hash: b.Snapshot().Hash, WorkerID: w.String(),
+		Scope: []string{"tools:*"}, ExpiresAt: now.Add(time.Hour), CreatedAt: now,
+	})
+	if err := repo.RotateAtomically(ctx, a.ID(), hashCollide); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("hash collide: want ErrConflict, got %v", err)
+	}
+}
+
 func TestPasskeyRepo(t *testing.T) {
 	ctx := context.Background()
 	repo := memory.NewPasskeyRepo()
@@ -383,10 +456,9 @@ func TestWorkloadKeyRepo_Concurrency(t *testing.T) {
 }
 
 // TestWorkloadKeyRepo_ConcurrentRotate exercises RotateKey concurrently against
-// the in-memory store. RotateKey creates the new key before deleting the old,
-// so the two briefly overlap; run with -race to detect data races in the
-// store's two-map (byID/byHash) maintenance across that overlap window. After
-// all rotations settle, exactly one key must survive and validate.
+// the in-memory store (AtomicRotator under one mutex). Run with -race to detect
+// data races in the store's two-map (byID/byHash) maintenance. After all
+// rotations settle, exactly n keys must survive.
 func TestWorkloadKeyRepo_ConcurrentRotate(t *testing.T) {
 	ctx := context.Background()
 	repo := memory.NewWorkloadKeyRepo()
@@ -418,7 +490,7 @@ func TestWorkloadKeyRepo_ConcurrentRotate(t *testing.T) {
 				t.Errorf("rotate %s: %v", id, err)
 				return
 			}
-			// The rotated token must validate during/after the overlap window.
+			// The rotated token must validate.
 			if _, err := svc.ValidateKey(ctx, newRaw); err != nil {
 				t.Errorf("validate rotated %s: %v", newKey.ID(), err)
 			}

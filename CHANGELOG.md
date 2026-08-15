@@ -7,6 +7,10 @@ breaking changes bump the minor version).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-15
+
+Security and DX hardening from the post-0.6.0 review, plus polish.
+
 ### Changed (breaking)
 
 - **`Session.Token()` after Validate is empty**: hydrated sessions no longer
@@ -35,12 +39,17 @@ breaking changes bump the minor version).
 
 - `AtomicSessionRotator` port; memory/sqlite/pgstore session repos implement
   it so `SessionService.Rotate` swaps in one atomic step.
+- `AtomicMagicLinkIssuer` port; Issue invalidate+save is atomic on
+  memory/sqlite/pgstore.
+- Memory `WorkloadKeyRepo` implements `AtomicRotator` (mutex swap).
 - `LockoutKeyFromEmail` helper (SHA-256 hex) so lockout keys need not store
   plaintext email.
 - Password plaintext length bound (1024) and `Argon2idParams.Validate`;
   `WorkerID` / lockout key length caps (255).
 - `middleware.BasicAuthMiddleware.Logout` — revoke from cookie + clear.
 - gosec enabled in `.golangci.yml`.
+- Examples updated for `TOTPService`, magic-link re-issue, and WebAuthn
+  `StateKey`.
 
 ### Fixed
 

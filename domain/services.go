@@ -171,14 +171,15 @@ func NewMagicLinkService(repo MagicLinkRepository, ttl time.Duration, clock Cloc
 
 // Issue creates a link and returns the RAW token to embed in the emailed URL.
 // The raw token is never persisted — only its hash. Any previously unconsumed
-// links for the same email+tenant are invalidated first so only the newly
-// emailed token remains redeemable.
+// links for the same email+tenant are invalidated so only the newly emailed
+// token remains redeemable.
+//
+// If the repository implements AtomicMagicLinkIssuer (memory/sqlite/pgstore do),
+// invalidate+save run in one atomic step. Otherwise InvalidateOutstanding then
+// Save run sequentially.
 func (s *MagicLinkService) Issue(ctx context.Context, email Email, tenantID TenantID) (Token, error) {
 	if tenantID.IsZero() {
 		return Token{}, ErrInvalidTenantID
-	}
-	if err := s.repo.InvalidateOutstanding(ctx, email, tenantID); err != nil {
-		return Token{}, err
 	}
 	raw, err := NewToken()
 	if err != nil {
@@ -190,6 +191,15 @@ func (s *MagicLinkService) Issue(ctx context.Context, email Email, tenantID Tena
 		email:     email,
 		tenantID:  tenantID,
 		expiresAt: t.Add(s.ttl),
+	}
+	if a, ok := s.repo.(AtomicMagicLinkIssuer); ok {
+		if err := a.IssueAtomically(ctx, link); err != nil {
+			return Token{}, err
+		}
+		return raw, nil
+	}
+	if err := s.repo.InvalidateOutstanding(ctx, email, tenantID); err != nil {
+		return Token{}, err
 	}
 	if err := s.repo.Save(ctx, link); err != nil {
 		return Token{}, err
@@ -397,10 +407,10 @@ func (s *WorkloadKeyService) ListKeys(ctx context.Context, workerID WorkerID) ([
 // RotateKey issues a replacement key — same worker, scope, and expiry — and
 // invalidates the old one, returning the new APIKey and its RAW token.
 //
-// If the store implements AtomicRotator (the sqlite and pgstore adapters do),
-// the swap runs in a single transaction: the old key is deleted and the new key
-// inserted atomically, so there is never a window where both keys are live and
-// no crash can leave the old key dangling.
+// If the store implements AtomicRotator (memory, sqlite, and pgstore do),
+// the swap runs in a single transaction (or mutex hold): the old key is deleted
+// and the new key inserted atomically, so there is never a window where both
+// keys are live and no crash can leave the old key dangling.
 //
 // Otherwise it falls back to a create-then-delete path: it creates the new key
 // first, then deletes the old one, so the two keys briefly OVERLAP (both valid)

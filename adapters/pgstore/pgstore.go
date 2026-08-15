@@ -209,6 +209,41 @@ func (r *MagicLinkRepo) InvalidateOutstanding(ctx context.Context, email domain.
 	return err
 }
 
+// IssueAtomically implements domain.AtomicMagicLinkIssuer: invalidate outstanding
+// links and insert the new one in a single transaction (or directly inside a Tx).
+func (r *MagicLinkRepo) IssueAtomically(ctx context.Context, link domain.MagicLink) error {
+	beginner, ok := r.db.(txBeginner)
+	if !ok {
+		return magicIssueSwap(ctx, r.db, link)
+	}
+	tx, err := beginner.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if err := magicIssueSwap(ctx, tx, link); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+func magicIssueSwap(ctx context.Context, db DB, link domain.MagicLink) error {
+	snap := link.Snapshot()
+	if _, err := db.ExecContext(ctx,
+		`UPDATE authgo_magic_links SET consumed = TRUE
+		 WHERE email = $1 AND tenant_id = $2 AND consumed = FALSE`,
+		snap.Email, snap.TenantID,
+	); err != nil {
+		return err
+	}
+	_, err := db.ExecContext(ctx,
+		`INSERT INTO authgo_magic_links (hash, email, tenant_id, expires_at, consumed)
+		 VALUES ($1, $2, $3, $4, $5)`,
+		snap.Hash, snap.Email, snap.TenantID, snap.ExpiresAt, snap.Consumed,
+	)
+	return err
+}
+
 // TOTPRepo is a Postgres domain.TOTPRepository. Secrets are encrypted at rest
 // when constructed with NewTOTPRepo (required SecretCipher). Use
 // NewPlaintextTOTPRepo only for tests or one-off migrations of legacy rows.
@@ -702,12 +737,14 @@ func isUniqueViolation(err error) bool {
 
 // Port assertions.
 var (
-	_ domain.UserRepository      = (*UserRepo)(nil)
-	_ domain.SessionRepository   = (*SessionRepo)(nil)
-	_ domain.MagicLinkRepository = (*MagicLinkRepo)(nil)
-	_ domain.TOTPRepository      = (*TOTPRepo)(nil)
-	_ domain.PasskeyRepository   = (*PasskeyRepo)(nil)
-	_ domain.LoginAttemptStore   = (*LoginAttemptRepo)(nil)
-	_ domain.WorkloadStore       = (*WorkloadKeyRepo)(nil)
-	_ domain.AtomicRotator       = (*WorkloadKeyRepo)(nil)
+	_ domain.UserRepository        = (*UserRepo)(nil)
+	_ domain.SessionRepository     = (*SessionRepo)(nil)
+	_ domain.AtomicSessionRotator  = (*SessionRepo)(nil)
+	_ domain.MagicLinkRepository   = (*MagicLinkRepo)(nil)
+	_ domain.AtomicMagicLinkIssuer = (*MagicLinkRepo)(nil)
+	_ domain.TOTPRepository        = (*TOTPRepo)(nil)
+	_ domain.PasskeyRepository     = (*PasskeyRepo)(nil)
+	_ domain.LoginAttemptStore     = (*LoginAttemptRepo)(nil)
+	_ domain.WorkloadStore         = (*WorkloadKeyRepo)(nil)
+	_ domain.AtomicRotator         = (*WorkloadKeyRepo)(nil)
 )
