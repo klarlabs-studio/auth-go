@@ -2,7 +2,8 @@
 // identity: issuing a scoped API key for an agent worker, validating it,
 // authorizing a concrete action against its scope, rotating it, and revoking.
 // It wires the in-memory adapter so it runs with no external services — swap in
-// adapters/sqlite or adapters/pgstore (which rotate atomically) in production.
+// adapters/sqlite or adapters/pgstore in production. All first-party adapters
+// rotate atomically (AtomicRotator).
 package main
 
 import (
@@ -47,7 +48,7 @@ func main() {
 		fmt.Println("denied email:send (not in scope), as expected")
 	}
 
-	// Rotate — issue new, invalidate old (atomic on the sql adapters).
+	// Rotate — issue new, invalidate old (atomic on memory/sqlite/pgstore).
 	newKey, newToken, err := wl.RotateKey(ctx, key.ID())
 	must(err)
 	fmt.Printf("rotated to key %s; new token=%s…\n", newKey.ID(), newToken.String()[:12])

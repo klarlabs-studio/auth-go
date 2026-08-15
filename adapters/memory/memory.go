@@ -197,12 +197,30 @@ func (r *MagicLinkRepo) InvalidateOutstanding(ctx context.Context, email domain.
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.invalidateLocked(email, tenantID)
+	return nil
+}
+
+func (r *MagicLinkRepo) invalidateLocked(email domain.Email, tenantID domain.TenantID) {
 	for h, snap := range r.m {
 		if !snap.Consumed && snap.Email == email.String() && snap.TenantID == tenantID.String() {
 			snap.Consumed = true
 			r.m[h] = snap
 		}
 	}
+}
+
+// IssueAtomically implements domain.AtomicMagicLinkIssuer: invalidate outstanding
+// links and insert the new one under one mutex hold.
+func (r *MagicLinkRepo) IssueAtomically(ctx context.Context, link domain.MagicLink) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.invalidateLocked(link.Email(), link.TenantID())
+	snap := link.Snapshot()
+	r.m[snap.Hash] = snap
 	return nil
 }
 
@@ -521,13 +539,42 @@ func (r *WorkloadKeyRepo) DeleteKey(ctx context.Context, id domain.KeyID) error 
 	return nil
 }
 
+// RotateAtomically implements domain.AtomicRotator: delete oldID and insert
+// newKey under one mutex hold (no overlap window).
+func (r *WorkloadKeyRepo) RotateAtomically(ctx context.Context, oldID domain.KeyID, newKey domain.APIKey) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	old, ok := r.byID[oldID.String()]
+	if !ok {
+		return domain.ErrNotFound
+	}
+	snap := newKey.Snapshot()
+	if _, exists := r.byID[snap.ID]; exists {
+		return domain.ErrConflict
+	}
+	if _, exists := r.byHash[snap.Hash]; exists {
+		return domain.ErrConflict
+	}
+	delete(r.byID, old.ID)
+	delete(r.byHash, old.Hash)
+	r.byID[snap.ID] = snap
+	r.byHash[snap.Hash] = snap.ID
+	return nil
+}
+
 // Port assertions.
 var (
-	_ domain.UserRepository      = (*UserRepo)(nil)
-	_ domain.SessionRepository   = (*SessionRepo)(nil)
-	_ domain.MagicLinkRepository = (*MagicLinkRepo)(nil)
-	_ domain.TOTPRepository      = (*TOTPRepo)(nil)
-	_ domain.PasskeyRepository   = (*PasskeyRepo)(nil)
-	_ domain.LoginAttemptStore   = (*LoginAttemptRepo)(nil)
-	_ domain.WorkloadStore       = (*WorkloadKeyRepo)(nil)
+	_ domain.UserRepository        = (*UserRepo)(nil)
+	_ domain.SessionRepository     = (*SessionRepo)(nil)
+	_ domain.AtomicSessionRotator  = (*SessionRepo)(nil)
+	_ domain.MagicLinkRepository   = (*MagicLinkRepo)(nil)
+	_ domain.AtomicMagicLinkIssuer = (*MagicLinkRepo)(nil)
+	_ domain.TOTPRepository        = (*TOTPRepo)(nil)
+	_ domain.PasskeyRepository     = (*PasskeyRepo)(nil)
+	_ domain.LoginAttemptStore     = (*LoginAttemptRepo)(nil)
+	_ domain.WorkloadStore         = (*WorkloadKeyRepo)(nil)
+	_ domain.AtomicRotator         = (*WorkloadKeyRepo)(nil)
 )

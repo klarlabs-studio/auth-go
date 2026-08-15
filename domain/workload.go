@@ -311,15 +311,13 @@ type WorkloadStore interface {
 
 // AtomicRotator is an OPTIONAL capability a WorkloadStore may also implement to
 // make key rotation atomic. WorkloadKeyService.RotateKey type-asserts its store
-// for this interface: a store that implements it gets a single-transaction swap
-// (the old key is deleted and the new key inserted in one atomic step, closing
-// the crash window where both keys could otherwise be live); a store that does
-// not falls back to the create-then-delete path with its documented overlap.
+// for this interface: a store that implements it gets a single-transaction (or
+// single-mutex) swap — the old key is deleted and the new key inserted in one
+// atomic step, closing the crash window where both keys could otherwise be live.
+// A store that does not falls back to the create-then-delete path with its
+// documented overlap.
 //
-// The sqlite and pgstore adapters implement this (single tx); the in-memory
-// store does not (it has no transactions — its create-then-delete is already
-// effectively atomic under its single store lock for the maps, but it cannot
-// offer a real DB transaction, so it deliberately omits the capability).
+// The memory, sqlite, and pgstore adapters all implement this.
 type AtomicRotator interface {
 	// RotateAtomically deletes oldID and inserts newKey in a single atomic
 	// operation. It returns ErrKeyNotFound if oldID is absent and ErrConflict if
