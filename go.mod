@@ -2,6 +2,8 @@ module github.com/klarlabs-studio/auth-go
 
 go 1.25.0
 
+toolchain go1.25.14
+
 require (
 	github.com/go-webauthn/webauthn v0.17.4
 	github.com/jackc/pgx/v5 v5.10.0
