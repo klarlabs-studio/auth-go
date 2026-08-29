@@ -7,6 +7,30 @@ breaking changes bump the minor version).
 
 ## [Unreleased]
 
+### Fixed
+
+- `pgstore.LoginAttemptRepo.RecordFailureAtomically` failed on every call with
+  SQLSTATE 42804, so **account lockout was inert for every Postgres consumer**.
+  `CASE WHEN … THEN $4 ELSE NULL END` has two untyped branches, so Postgres
+  resolved the expression as `text` and refused to assign it to a `timestamptz`
+  column. The `$4::timestamptz` casts are the fix.
+
+  The failure was total and silent: the table was created, no row was ever
+  written, and a failure count that never rises looks exactly like an account
+  nobody is attacking. `LockoutService` reported no lock because the store never
+  recorded one.
+
+  `memory` and `sqlite` had tests for this method and passed — sqlite is
+  dynamically typed, so the same SQL is valid there. The only adapter that could
+  fail was the only adapter without a test, and CI ran no Postgres at all, so
+  every pgstore test skipped while the package still printed `ok`.
+
+### Added
+
+- A `pgstore` CI job with a Postgres service, and a step that fails if those
+  tests skip. A skipped test and a passing test are indistinguishable in a
+  normal summary, which is how the above survived.
+
 ## [0.7.1] - 2026-08-29
 
 ### Added
