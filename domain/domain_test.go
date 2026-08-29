@@ -746,6 +746,82 @@ func TestMagicLinkService_SingleUse(t *testing.T) {
 	}
 }
 
+// Peek reports on a link without spending it, so the link survives being
+// opened. This is the case that motivated it: a consumer that renders something
+// before the recipient commits runs code on page load, and if that code
+// consumed, a reload or a browser prerender destroyed the link.
+func TestMagicLinkService_PeekDoesNotSpend(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	svc := domain.NewMagicLinkService(memory.NewMagicLinkRepo(), 15*time.Minute, fixedClock(&now))
+
+	raw, err := svc.Issue(ctx, mustEmail(t, "felix@klarlabs.de"), mustTenantID(t, "t1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Opened repeatedly, as a reload or a prerender would.
+	for i := range 3 {
+		link, err := svc.Peek(ctx, raw)
+		if err != nil {
+			t.Fatalf("peek %d: %v", i, err)
+		}
+		if link.Email().String() != "felix@klarlabs.de" {
+			t.Fatalf("peek %d: unexpected link: %+v", i, link.Snapshot())
+		}
+	}
+	// And still redeemable afterwards, which is the whole point.
+	if _, err := svc.Consume(ctx, raw); err != nil {
+		t.Fatalf("consume after peeking: %v — peeking spent the link", err)
+	}
+}
+
+// Peek reports the same conditions Consume does, so a caller can decide before
+// acting rather than discovering the state by destroying it.
+func TestMagicLinkService_PeekReportsSpentAndExpired(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	svc := domain.NewMagicLinkService(memory.NewMagicLinkRepo(), 15*time.Minute, fixedClock(&now))
+
+	spent, _ := svc.Issue(ctx, mustEmail(t, "a@b.co"), mustTenantID(t, "t"))
+	if _, err := svc.Consume(ctx, spent); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Peek(ctx, spent); !errors.Is(err, domain.ErrConsumed) {
+		t.Fatalf("peek at a spent link: want ErrConsumed, got %v", err)
+	}
+
+	stale, _ := svc.Issue(ctx, mustEmail(t, "c@d.co"), mustTenantID(t, "t"))
+	now = now.Add(16 * time.Minute)
+	if _, err := svc.Peek(ctx, stale); !errors.Is(err, domain.ErrExpired) {
+		t.Fatalf("peek at an expired link: want ErrExpired, got %v", err)
+	}
+
+	if _, err := svc.Peek(ctx, domain.Token{}); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("peek at an unknown link: want ErrNotFound, got %v", err)
+	}
+}
+
+// Peeking must not disturb single-use under concurrency either: many readers,
+// still exactly one winner.
+func TestMagicLinkService_PeekDoesNotWeakenSingleUse(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	svc := domain.NewMagicLinkService(memory.NewMagicLinkRepo(), 15*time.Minute, fixedClock(&now))
+	raw, _ := svc.Issue(ctx, mustEmail(t, "a@b.co"), mustTenantID(t, "t"))
+
+	for range 5 {
+		if _, err := svc.Peek(ctx, raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := svc.Consume(ctx, raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Consume(ctx, raw); !errors.Is(err, domain.ErrConsumed) {
+		t.Fatalf("second consume after peeking: want ErrConsumed, got %v", err)
+	}
+}
+
 func TestMagicLinkService_Expiry(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)

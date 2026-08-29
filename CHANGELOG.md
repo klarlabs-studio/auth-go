@@ -7,6 +7,31 @@ breaking changes bump the minor version).
 
 ## [Unreleased]
 
+### Added
+
+- `MagicLinkService.Peek` — validate a link without spending it. Returns the
+  same `ErrNotFound` / `ErrExpired` / `ErrConsumed` conditions as `Consume` but
+  never marks the link, so a caller can answer "is this link good?" before
+  acting on it.
+
+  Single-use links are routinely *opened* before they are *accepted*. Any
+  consumer that shows the recipient something first — an authenticator QR to
+  scan, "you have been invited to Acme, continue?", a password field — runs code
+  on page load, and if that code consumes, then a reload, a browser prerender,
+  or opening the link on a phone instead of a laptop destroys it. The
+  recipient's most natural recovery action is the one that makes recovery
+  impossible.
+
+  With only `Issue` and `Consume`, every such consumer builds the same
+  compensating table: remember which links were opened and serve repeats from
+  that record. That is duplicated per consumer, security-relevant, and easy to
+  get subtly wrong.
+
+  `Peek` does not weaken single-use — it reports, it never marks. Spend the link
+  with `Consume` at the moment the recipient commits. Note that a successful
+  `Peek` is **not** authentication: two people holding the same link both peek
+  successfully. Authenticate with `Consume`.
+
 ## [0.7.0] - 2026-08-15
 
 Security and DX hardening from the post-0.6.0 review, plus polish.
