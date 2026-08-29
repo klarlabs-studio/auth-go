@@ -46,3 +46,68 @@ jobs:
       # bypasses the `baselined -eq 0` report-only branch, so any crit/high would
       # have failed the build regardless; it passes because there genuinely are
       # none. What was broken was the waiver list, not the gate.
+
+  # The Postgres adapter, exercised against Postgres.
+  #
+  # The shared go-ci workflow runs `go test ./...` with no database, and every
+  # pgstore test skips itself when TEST_DATABASE_URL is unset. The package still
+  # prints "ok", so the job was green while the adapter production uses was
+  # never executed at all.
+  #
+  # That is not hypothetical. RecordFailureAtomically failed on its first call
+  # with SQLSTATE 42804 for as long as it has existed: `CASE WHEN … THEN $4 ELSE
+  # NULL END` has two untyped branches, so Postgres resolved it as text and
+  # refused to write a timestamptz. memory and sqlite had tests for that method
+  # and passed — sqlite is dynamically typed — so the only adapter that could
+  # fail was the only adapter without a test. Account lockout was inert for
+  # every pgstore consumer, and a failure count that never rises is
+  # indistinguishable from an account nobody is attacking.
+  pgstore:
+    name: Postgres adapter
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+        env:
+          POSTGRES_USER: authgo
+          POSTGRES_PASSWORD: authgo
+          POSTGRES_DB: authgo_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      TEST_DATABASE_URL: postgres://authgo:authgo@127.0.0.1:5432/authgo_test?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Test the Postgres adapter
+        run: go test ./adapters/pgstore/... -count=1 -race
+
+      # Proves those tests executed rather than skipped.
+      #
+      # Without this the job can regress to exactly the state it exists to fix:
+      # a renamed variable or a dropped service block turns every test into a
+      # skip, and the summary still says ok. Asserting on verbose output makes
+      # the regression loud instead of invisible.
+      - name: Assert the Postgres tests really ran
+        run: |
+          set -euo pipefail
+          go test ./adapters/pgstore/... -count=1 -v | tee /tmp/pgstore.log
+          if grep -q -- '--- SKIP' /tmp/pgstore.log; then
+            echo "::error::pgstore tests skipped; the adapter production uses was not exercised"
+            exit 1
+          fi
+          if ! grep -q -- '--- PASS: TestLoginAttemptRepo_RecordFailureAtomically' /tmp/pgstore.log; then
+            echo "::error::the lockout test did not run"
+            exit 1
+          fi
+

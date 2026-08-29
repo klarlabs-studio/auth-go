@@ -501,20 +501,31 @@ func (r *LoginAttemptRepo) Delete(ctx context.Context, key string) error {
 // RecordFailureAtomically implements domain.AtomicLoginAttemptStore in a single
 // conditional UPSERT: failure_count + 1 is evaluated in SQL, so concurrent
 // failures for one key can't lose increments the way a Get→Save pair can.
+//
+// The $4::timestamptz casts are load-bearing. In `CASE WHEN … THEN $4 ELSE NULL
+// END` both branches are untyped, so Postgres resolves the CASE as text and the
+// insert into a timestamptz column fails with SQLSTATE 42804 — every call, on
+// the first failed login. Lockout was therefore inert for every pgstore
+// consumer: the table existed, the rows never appeared, and a failure count
+// that never rises is indistinguishable from an account nobody is attacking.
+//
+// The memory and sqlite adapters had tests for this method; sqlite is
+// dynamically typed, so the same SQL is fine there. Only Postgres cares, and
+// Postgres was the adapter without a test.
 func (r *LoginAttemptRepo) RecordFailureAtomically(ctx context.Context, key string, now time.Time, maxFailures int, window time.Duration) (domain.LoginAttemptSnapshot, bool, error) {
 	lockAt := now.Add(window)
 	var snap domain.LoginAttemptSnapshot
 	var until sql.NullTime
 	err := r.db.QueryRowContext(ctx,
 		`INSERT INTO authgo_login_attempts (key, failure_count, locked_until, updated_at)
-		 VALUES ($1, 1, CASE WHEN 1 >= $3 THEN $4 ELSE NULL END, now())
+		 VALUES ($1, 1, CASE WHEN 1 >= $3 THEN $4::timestamptz ELSE NULL END, now())
 		 ON CONFLICT (key) DO UPDATE SET
 		   failure_count = CASE
 		     WHEN authgo_login_attempts.locked_until IS NOT NULL AND authgo_login_attempts.locked_until <= $2 THEN 1
 		     ELSE authgo_login_attempts.failure_count + 1 END,
 		   locked_until = CASE
 		     WHEN authgo_login_attempts.locked_until IS NOT NULL AND authgo_login_attempts.locked_until > $2 THEN authgo_login_attempts.locked_until
-		     WHEN (CASE WHEN authgo_login_attempts.locked_until IS NOT NULL AND authgo_login_attempts.locked_until <= $2 THEN 1 ELSE authgo_login_attempts.failure_count + 1 END) >= $3 THEN $4
+		     WHEN (CASE WHEN authgo_login_attempts.locked_until IS NOT NULL AND authgo_login_attempts.locked_until <= $2 THEN 1 ELSE authgo_login_attempts.failure_count + 1 END) >= $3 THEN $4::timestamptz
 		     ELSE NULL END,
 		   updated_at = now()
 		 RETURNING failure_count, locked_until`,
