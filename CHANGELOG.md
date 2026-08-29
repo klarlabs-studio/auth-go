@@ -7,6 +7,8 @@ breaking changes bump the minor version).
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-08-29
+
 ### Fixed
 
 - `pgstore.LoginAttemptRepo.RecordFailureAtomically` failed on every call with
