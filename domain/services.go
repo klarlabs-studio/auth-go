@@ -207,6 +207,44 @@ func (s *MagicLinkService) Issue(ctx context.Context, email Email, tenantID Tena
 	return raw, nil
 }
 
+// Peek validates a raw token WITHOUT spending it, returning the link it names.
+// Returns ErrNotFound / ErrExpired / ErrConsumed on the same conditions as
+// Consume, so a caller can answer "is this link good?" before acting on it.
+//
+// This exists because single-use links are frequently opened before they are
+// accepted. A consumer that shows anything to the recipient first — an
+// authenticator QR to scan, "you have been invited to Acme, continue?", a
+// password field — has to run some code on page load, and if that code
+// consumes, then a reload, a browser prerender, or opening the link on a phone
+// instead of a laptop destroys the link. The recipient's most natural recovery
+// action is the one that makes recovery impossible.
+//
+// With only Issue and Consume available, every such consumer builds the same
+// compensating table: remember which links were opened, and serve repeats from
+// that record so the link survives until it is genuinely accepted. That is
+// duplicated per consumer, security-relevant, and easy to get subtly wrong.
+//
+// Peek does not weaken single-use. It reports; it never marks. The link is
+// still spent by exactly one Consume, which the caller runs at the moment the
+// recipient commits — not at the moment their browser loads a page.
+//
+// Peek is not authentication. A caller that treats a successful Peek as proof
+// of identity has built a reusable credential: two people holding the same link
+// both peek successfully. Authenticate with Consume.
+func (s *MagicLinkService) Peek(ctx context.Context, raw Token) (MagicLink, error) {
+	link, err := s.repo.FindByHash(ctx, HashToken(raw))
+	if err != nil {
+		return MagicLink{}, err
+	}
+	if link.consumed {
+		return MagicLink{}, ErrConsumed
+	}
+	if link.Expired(s.now()) {
+		return MagicLink{}, ErrExpired
+	}
+	return link, nil
+}
+
 // Consume validates a raw token and, on success, marks it consumed and returns
 // the link. Returns ErrNotFound / ErrExpired / ErrConsumed otherwise.
 func (s *MagicLinkService) Consume(ctx context.Context, raw Token) (MagicLink, error) {

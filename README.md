@@ -101,7 +101,8 @@ err = cfg.Validate(secret, userCode, time.Now())
 
 ml := domain.NewMagicLinkService(pgstore.NewMagicLinkRepo(db), 15*time.Minute, nil)
 raw, _ := ml.Issue(ctx, emailVO, tid)  // email raw.String(); prior links for email+tenant invalidated
-link, err := ml.Consume(ctx, raw)      // single-use
+link, err := ml.Peek(ctx, raw)         // is it good? does NOT spend it
+link, err = ml.Consume(ctx, raw)       // single-use; spend it when they commit
 
 // Workload keys: scoped, time-boxed API keys for agent workers.
 wk := domain.NewWorkloadKeyService(pgstore.NewWorkloadKeyRepo(db), nil)
