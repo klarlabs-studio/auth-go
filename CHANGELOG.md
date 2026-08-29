@@ -7,6 +7,8 @@ breaking changes bump the minor version).
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-08-29
+
 ### Added
 
 - `MagicLinkService.Peek` — validate a link without spending it. Returns the
