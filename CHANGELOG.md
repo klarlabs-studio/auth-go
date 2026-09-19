@@ -7,6 +7,39 @@ breaking changes bump the minor version).
 
 ## [Unreleased]
 
+### Added
+
+- **`oidc` — an OpenID Connect ID-token verifier** for tokens issued by a third
+  party, so a CI job or workload can authenticate with a short-lived ID token
+  instead of a stored secret. stdlib only; no new dependency.
+
+  `oidc.New(Config)` builds a `Verifier` for one issuer. It discovers
+  `jwks_uri` from `{issuer}/.well-known/openid-configuration` (the document's
+  `issuer` must match exactly; HTTPS required, no redirects, 1 MiB cap) and
+  caches the key set for its `Cache-Control: max-age`, clamped to
+  [5 min, 24 h]. An unknown `kid` refetches, single-flight and at most once
+  per 30 s; a failed refetch keeps the last good set serving.
+
+  `Verify` parses strictly — canonical base64url only, no duplicate JSON
+  members, `kid` required, `crit` refused, keys never taken from the token —
+  checks `alg` against an allow-list (default RS256; `none` and HS* cannot be
+  configured) and against the key's `kty`/curve/`alg`, then the signature,
+  `iss` (exact), `aud`, and `exp`/`iat`/`nbf` with 60 s skew. It returns typed
+  registered claims plus the raw claim map (numbers as `json.Number`). Errors
+  are typed: `ErrMalformed`, `ErrAlgorithm`, `ErrUnknownKey`, `ErrSignature`,
+  `ErrIssuer`, `ErrAudience`, `ErrExpired`, `ErrNotYetValid`,
+  `ErrMissingClaim`, `ErrKeySetUnavailable`.
+
+  `oidc.GitHubActions(audience)` is the GitHub Actions profile (issuer
+  `https://token.actions.githubusercontent.com`, RS256, `sub` and `jti`
+  required), and `ParseGitHubActionsClaims` returns `repository_id` and
+  `repository_owner_id` as integers alongside `repository`, `ref`, `sha`,
+  `event_name`, `job_workflow_ref` and `runner_environment`. Authorise on the
+  numeric IDs: names can be renamed and re-registered by someone else.
+
+  Filed for Glossa, whose CI authenticates with GitHub Actions OIDC; the gap is
+  filled here rather than in the product.
+
 ## [0.7.2] - 2026-08-29
 
 ### Fixed
