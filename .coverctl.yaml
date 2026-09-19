@@ -21,6 +21,13 @@ policy:
       match:
         - ./adapters/sqlite/...
       min: 85
+    # OIDC verifier — untrusted tokens and documents from the network; every
+    # rejection path is a security control. Unit-tested against an httptest
+    # issuer, so the bar can sit high.
+    - name: oidc
+      match:
+        - ./oidc/...
+      min: 90
     # WebAuthn adapter — ceremonies need a real browser/authenticator; only
     # wiring + option generation is unit-testable.
     - name: webauthn
