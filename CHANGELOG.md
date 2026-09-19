@@ -18,7 +18,11 @@ breaking changes bump the minor version).
   `issuer` must match exactly; HTTPS required, no redirects, 1 MiB cap) and
   caches the key set for its `Cache-Control: max-age`, clamped to
   [5 min, 24 h]. An unknown `kid` refetches, single-flight and at most once
-  per 30 s; a failed refetch keeps the last good set serving.
+  per 30 s; a failed refetch keeps the last good set serving, bounded by
+  `MaxStale` (default 24 h, measured from the last successful fetch) — past it
+  verification fails with `ErrKeySetUnavailable` until a refetch succeeds, so
+  a revoked key cannot stay trusted just because its JWKS endpoint is
+  unreachable.
 
   `Verify` parses strictly — canonical base64url only, no duplicate JSON
   members, `kid` required, `crit` refused, keys never taken from the token —

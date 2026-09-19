@@ -25,7 +25,9 @@
 // clamped to [MinKeySetTTL, MaxKeySetTTL]. A token with an unknown kid
 // triggers a refetch (key rotation), single-flight and at most once per
 // MinRefreshInterval. When a refetch fails the last good key set keeps
-// serving. A Verifier is safe for concurrent use.
+// serving for up to Config.MaxStale after its fetch (default 24 h), then
+// verification fails closed until a refetch succeeds. A Verifier is safe for
+// concurrent use.
 package oidc
 
 import (
@@ -74,6 +76,15 @@ type Config struct {
 	// RequireJTI rejects tokens without a non-empty jti (ErrMissingClaim) —
 	// set it when the caller tracks jti to refuse replays.
 	RequireJTI bool
+	// MaxStale bounds how long after the last successful key-set fetch the
+	// set may still verify tokens when refetches fail (issuer down, endpoint
+	// blocked). Past it, Verify fails with ErrKeySetUnavailable until a
+	// refetch succeeds, so a key the issuer has revoked cannot stay trusted
+	// just because its JWKS endpoint is unreachable. It is measured from the
+	// fetch, so it includes the fresh period; the key set is refetched no
+	// later than MaxStale even if its max-age is longer. Zero means
+	// DefaultMaxStale (24 h); otherwise it must exceed MinKeySetTTL.
+	MaxStale time.Duration
 	// HTTPClient fetches discovery and the key set. Default: a client with a
 	// 10 s timeout. The Verifier uses a copy that never follows redirects, so
 	// the https policy cannot be bypassed by a redirect.
@@ -135,6 +146,9 @@ func New(cfg Config) (*Verifier, error) {
 	if cfg.ClockSkew < 0 {
 		return nil, fmt.Errorf("%w: negative clock skew", ErrInvalidConfig)
 	}
+	if cfg.MaxStale != 0 && cfg.MaxStale <= MinKeySetTTL {
+		return nil, fmt.Errorf("%w: MaxStale must exceed %s", ErrInvalidConfig, MinKeySetTTL)
+	}
 	algs, err := allowList(cfg.Algorithms)
 	if err != nil {
 		return nil, err
@@ -153,7 +167,8 @@ func New(cfg Config) (*Verifier, error) {
 		now:            now,
 	}
 	v.keys = &keyCache{
-		now: now,
+		now:      now,
+		maxStale: cmp.Or(cfg.MaxStale, DefaultMaxStale),
 		src: &keySource{
 			issuer:       cfg.Issuer,
 			discoveryURL: strings.TrimSuffix(cfg.Issuer, "/") + "/.well-known/openid-configuration",

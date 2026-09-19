@@ -325,3 +325,73 @@ func TestKeySet_CallerCancellationDoesNotAbortSharedFetch(t *testing.T) {
 	mustVerify(t, v, tok) // joins or follows the same fetch; no second request
 	wantFetches(t, fi, 1)
 }
+
+// TestKeySet_MaxStaleBoundsServingAFailedIssuer: the last good set keeps
+// verifying while refetches fail, but only until MaxStale after its fetch;
+// then verification fails closed until a refetch succeeds.
+func TestKeySet_MaxStaleBoundsServingAFailedIssuer(t *testing.T) {
+	fi := newFakeIssuer(t, false, rsaJWK("a", &rsaKeyA().PublicKey, ""))
+	clock := newClock()
+	v := newVerifier(t, fi, clock, func(c *oidc.Config) { c.MaxStale = 2 * time.Hour })
+	fetchedAt := clock.Now()
+	mustVerify(t, v, tokenFor(t, fi, clock, "a", rsaKeyA()))
+
+	fi.set(func(fi *fakeIssuer) { fi.jwksStatus = http.StatusServiceUnavailable })
+
+	// Stale (past the 1 h TTL) but within MaxStale: still verifies.
+	clock.Advance(oidc.DefaultKeySetTTL + time.Minute)
+	mustVerify(t, v, tokenFor(t, fi, clock, "a", rsaKeyA()))
+	clock.Advance(fetchedAt.Add(2*time.Hour - time.Second).Sub(clock.Now()))
+	mustVerify(t, v, tokenFor(t, fi, clock, "a", rsaKeyA()))
+	n := fi.jwksCount()
+
+	// At MaxStale the old set is no longer trusted, even while the refetch
+	// is rate-limited (the last attempt was a second ago).
+	clock.Advance(time.Second)
+	wantErr(t, v, tokenFor(t, fi, clock, "a", rsaKeyA()), oidc.ErrKeySetUnavailable)
+	wantFetches(t, fi, n)
+	// The next permitted refetch fails too: still unavailable.
+	clock.Advance(oidc.MinRefreshInterval)
+	wantErr(t, v, tokenFor(t, fi, clock, "a", rsaKeyA()), oidc.ErrKeySetUnavailable)
+	wantFetches(t, fi, n+1)
+	wantErr(t, v, tokenFor(t, fi, clock, "a", rsaKeyA()), oidc.ErrKeySetUnavailable)
+	wantFetches(t, fi, n+1)
+
+	// Recovery: the next permitted refetch that succeeds restores verification.
+	fi.set(func(fi *fakeIssuer) { fi.jwksStatus = http.StatusOK })
+	clock.Advance(oidc.MinRefreshInterval)
+	mustVerify(t, v, tokenFor(t, fi, clock, "a", rsaKeyA()))
+	wantFetches(t, fi, n+2)
+}
+
+// TestKeySet_MaxStaleDefault: without MaxStale, a failed issuer is tolerated
+// for 24 h after the last successful fetch and no longer.
+func TestKeySet_MaxStaleDefault(t *testing.T) {
+	fi := newFakeIssuer(t, false, rsaJWK("a", &rsaKeyA().PublicKey, ""))
+	clock := newClock()
+	v := newVerifier(t, fi, clock)
+	mustVerify(t, v, tokenFor(t, fi, clock, "a", rsaKeyA()))
+	fi.set(func(fi *fakeIssuer) { fi.jwksStatus = http.StatusInternalServerError })
+
+	clock.Advance(oidc.DefaultMaxStale - time.Second)
+	mustVerify(t, v, tokenFor(t, fi, clock, "a", rsaKeyA()))
+	clock.Advance(oidc.MinRefreshInterval)
+	wantErr(t, v, tokenFor(t, fi, clock, "a", rsaKeyA()), oidc.ErrKeySetUnavailable)
+}
+
+// TestKeySet_MaxStaleCapsFreshness: a max-age longer than MaxStale does not
+// let the set go unusable before it is refetched.
+func TestKeySet_MaxStaleCapsFreshness(t *testing.T) {
+	fi := newFakeIssuer(t, false, rsaJWK("a", &rsaKeyA().PublicKey, ""))
+	fi.set(func(fi *fakeIssuer) { fi.cacheControl = "max-age=86400" })
+	clock := newClock()
+	v := newVerifier(t, fi, clock, func(c *oidc.Config) { c.MaxStale = 10 * time.Minute })
+	mustVerify(t, v, tokenFor(t, fi, clock, "a", rsaKeyA()))
+
+	clock.Advance(10*time.Minute - time.Second)
+	mustVerify(t, v, tokenFor(t, fi, clock, "a", rsaKeyA()))
+	wantFetches(t, fi, 1)
+	clock.Advance(time.Second)
+	mustVerify(t, v, tokenFor(t, fi, clock, "a", rsaKeyA())) // refetched, not failed
+	wantFetches(t, fi, 2)
+}

@@ -160,7 +160,11 @@ same way through `oidc.Config{Issuer, Audiences, Algorithms, ...}`.
 - **Cache.** Fetched on first use and kept for `Cache-Control: max-age`, clamped
   to [5 min, 24 h] (1 h without one). An unknown `kid` refetches — key rotation
   — single-flight and at most once per 30 s, so random kids cannot hammer the
-  issuer. A failed refetch keeps the last good set serving.
+  issuer. A failed refetch keeps the last good set serving — but only until
+  `MaxStale` (default 24 h) after its fetch, so an attacker who keeps the JWKS
+  endpoint unreachable cannot keep a revoked key trusted indefinitely. Past
+  that, verification fails with `ErrKeySetUnavailable` until a refetch
+  succeeds.
 - **Parsing.** Canonical unpadded base64url only (no padding, whitespace or
   non-zero trailing bits), no duplicate JSON members, valid UTF-8, `kid`
   required, `crit` refused, and keys never taken from the token (`jku`, `jwk`,

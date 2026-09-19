@@ -37,6 +37,9 @@ const (
 	MaxKeySetTTL = 24 * time.Hour
 	// DefaultKeySetTTL applies when the response carries no max-age.
 	DefaultKeySetTTL = time.Hour
+	// DefaultMaxStale is Config.MaxStale's default: how long after the last
+	// successful fetch a key set may still verify tokens while refetches fail.
+	DefaultMaxStale = 24 * time.Hour
 
 	fetchTimeout = 15 * time.Second
 	minRSABits   = 2048
@@ -277,15 +280,20 @@ func cacheTTL(cacheControl string) time.Duration {
 // keyCache holds the last good key set and decides when to refetch it:
 // on first use, after its TTL, and when a token names an unknown kid. Fetches
 // are single-flight and at most one per MinRefreshInterval. A failed fetch
-// never discards the last good set.
+// keeps the last good set serving, but only until maxStale after the last
+// successful fetch: past that the set is unusable until a refetch succeeds, so
+// an attacker who keeps the JWKS endpoint unreachable cannot keep a revoked
+// key trusted indefinitely.
 type keyCache struct {
-	src *keySource
-	now func() time.Time
+	src      *keySource
+	now      func() time.Time
+	maxStale time.Duration
 
 	mu          sync.Mutex
 	jwksURI     string // discovered once, then reused
 	keys        map[string][]*jwk
-	expiresAt   time.Time
+	fetchedAt   time.Time // last successful fetch
+	expiresAt   time.Time // fetchedAt + min(TTL, maxStale)
 	lastAttempt time.Time
 	lastErr     error
 	inflight    chan struct{} // closed when the running fetch finishes
@@ -293,14 +301,19 @@ type keyCache struct {
 
 // lookup returns the keys with the given kid, fetching the key set when it
 // has none, when it is stale, or when kid is not in it — subject to the rate
-// limit. A stale set is still used when a refetch fails or is rate-limited.
+// limit. A stale set is still used when a refetch fails or is rate-limited, as
+// long as it is within maxStale of its fetch.
 func (c *keyCache) lookup(ctx context.Context, kid string) ([]*jwk, error) {
 	fetched := false
 	for {
 		c.mu.Lock()
 		now := c.now()
-		found := c.keys[kid]
-		fresh := c.keys != nil && now.Before(c.expiresAt)
+		usable := c.usableLocked(now)
+		var found []*jwk
+		if usable {
+			found = c.keys[kid]
+		}
+		fresh := usable && now.Before(c.expiresAt)
 		if len(found) > 0 && (fresh || fetched) {
 			c.mu.Unlock()
 			return found, nil
@@ -308,7 +321,7 @@ func (c *keyCache) lookup(ctx context.Context, kid string) ([]*jwk, error) {
 		done := c.inflight
 		if done == nil {
 			if fetched || !c.mayFetchLocked(now) {
-				err := c.missLocked(kid)
+				err := c.missLocked(kid, usable)
 				c.mu.Unlock()
 				if len(found) > 0 {
 					return found, nil // stale, but the last good set
@@ -332,14 +345,25 @@ func (c *keyCache) mayFetchLocked(now time.Time) bool {
 	return c.lastAttempt.IsZero() || now.Sub(c.lastAttempt) >= MinRefreshInterval
 }
 
-func (c *keyCache) missLocked(kid string) error {
-	if c.keys == nil {
-		if c.lastErr != nil {
-			return fmt.Errorf("%w: %w", ErrKeySetUnavailable, c.lastErr)
-		}
-		return ErrKeySetUnavailable
+// usableLocked reports whether the cached set may verify tokens at all: it
+// exists and its last successful fetch is less than maxStale ago.
+func (c *keyCache) usableLocked(now time.Time) bool {
+	return c.keys != nil && now.Before(c.fetchedAt.Add(c.maxStale))
+}
+
+func (c *keyCache) missLocked(kid string, usable bool) error {
+	if usable {
+		return fmt.Errorf("%w: kid %q", ErrUnknownKey, kid)
 	}
-	return fmt.Errorf("%w: kid %q", ErrUnknownKey, kid)
+	reason := errors.New("no key set fetched yet")
+	if c.keys != nil {
+		reason = fmt.Errorf("key set last fetched %s, beyond max staleness %s",
+			c.fetchedAt.UTC().Format(time.RFC3339), c.maxStale)
+	}
+	if c.lastErr != nil {
+		return fmt.Errorf("%w: %w: %w", ErrKeySetUnavailable, reason, c.lastErr)
+	}
+	return fmt.Errorf("%w: %w", ErrKeySetUnavailable, reason)
 }
 
 // startFetchLocked launches the one in-flight fetch. It runs detached from the
@@ -369,7 +393,10 @@ func (c *keyCache) startFetchLocked(ctx context.Context, now time.Time) chan str
 			c.jwksURI = uri // discovery succeeded; keep it even if the JWKS fetch failed
 		}
 		if err == nil {
-			c.keys, c.expiresAt, c.lastErr = keys, c.now().Add(ttl), nil
+			at := c.now()
+			c.keys, c.fetchedAt, c.lastErr = keys, at, nil
+			// Never fresh past the point where the set stops being usable.
+			c.expiresAt = at.Add(min(ttl, c.maxStale))
 		} else {
 			c.lastErr = err
 		}
