@@ -38,6 +38,9 @@ middleware/
   basicauth.go       BasicAuthMiddleware — inbound HTTP adapter; Basic → session
                      handshake (stdlib net/http, depends only on the domain)
 
+oidc/                OIDC ID-token Verifier for third-party issuers (stdlib only):
+                     discovery, cached JWKS, strict JWS; GitHub Actions profile
+
 example/
   human/             runnable human auth walkthrough (go run ./example/human)
   workload/          runnable workload identity walkthrough (go run ./example/workload)
@@ -61,6 +64,7 @@ trace propagation.
 | Passkeys | `adapters/webauthn` | WebAuthn; HMAC-signed ceremony state (`StateKey`); kept an adapter so the core carries only `x/crypto` |
 | Workload keys | `domain.WorkloadKeyService` | scoped API keys for agent workers — 256-bit token (stdlib only), only the SHA-256 hash stored, `resource:action` scopes with `tools:*` wildcards, issue/validate/authorize/revoke; rotate atomic on all first-party adapters (`AtomicRotator`) |
 | Basic auth | `middleware.BasicAuthMiddleware` | bootstrap-then-session handshake; `Basic` once, session cookie after — fits browser SPAs |
+| OIDC ID tokens | `oidc.Verifier` | verify ID tokens from an external issuer (GitHub Actions, cloud workload identity): discovery, cached JWKS with rotation, RS/PS/ES only; `oidc.GitHubActions` profile |
 
 ## Example
 
@@ -130,6 +134,50 @@ http.Handle("/ui/", mw.Middleware(uiHandler))
 // downstream: sess, _ := middleware.SessionFromContext(r.Context())
 // logout: mw.Logout(w, r)  // revokes from cookie; do not Revoke(sess.Token()) after Validate
 ```
+
+## OIDC ID tokens (workload federation)
+
+`oidc` verifies ID tokens minted by someone else — typically a CI job proving
+who it is without a stored secret. It is not a login flow: the product
+verifies the token, then maps a claim it trusts to its own authorisation.
+
+```go
+v, err := oidc.New(oidc.GitHubActions("glossa")) // issuer, RS256, sub + jti required
+tok, err := v.Verify(ctx, rawIDToken)            // signature, iss, aud, exp/iat/nbf (±60 s)
+gh, err := oidc.ParseGitHubActionsClaims(tok)
+// Authorise on the immutable numeric IDs, never on names:
+conn, err := store.GitConnectionByRepositoryID(ctx, gh.RepositoryID)
+// then narrow if needed: gh.Ref, gh.EventName, gh.JobWorkflowRef, gh.RunnerEnvironment
+```
+
+The job side requests the token with that audience (`core.getIDToken("glossa")`,
+or `ACTIONS_ID_TOKEN_REQUEST_URL&audience=glossa`). Any other issuer works the
+same way through `oidc.Config{Issuer, Audiences, Algorithms, ...}`.
+
+- **Keys.** `jwks_uri` comes from `{issuer}/.well-known/openid-configuration`,
+  whose `issuer` must match exactly. HTTPS only (`AllowInsecureHTTPHosts` for
+  tests), redirects are not followed, responses are capped at 1 MiB.
+- **Cache.** Fetched on first use and kept for `Cache-Control: max-age`, clamped
+  to [5 min, 24 h] (1 h without one). An unknown `kid` refetches — key rotation
+  — single-flight and at most once per 30 s, so random kids cannot hammer the
+  issuer. A failed refetch keeps the last good set serving — but only until
+  `MaxStale` (default 24 h) after its fetch, so an attacker who keeps the JWKS
+  endpoint unreachable cannot keep a revoked key trusted indefinitely. Past
+  that, verification fails with `ErrKeySetUnavailable` until a refetch
+  succeeds.
+- **Parsing.** Canonical unpadded base64url only (no padding, whitespace or
+  non-zero trailing bits), no duplicate JSON members, valid UTF-8, `kid`
+  required, `crit` refused, and keys never taken from the token (`jku`, `jwk`,
+  `x5u`, `x5c` are ignored).
+- **Algorithms.** An allow-list (default `RS256`) that must also match the key's
+  `kty`, curve and pinned `alg`. `none` and `HS*` cannot be configured, which
+  rules out the public-key-as-HMAC-secret confusion.
+- **Errors.** `ErrMalformed`, `ErrAlgorithm`, `ErrUnknownKey`, `ErrSignature`,
+  `ErrIssuer`, `ErrAudience`, `ErrExpired`, `ErrNotYetValid`, `ErrMissingClaim`,
+  `ErrKeySetUnavailable` — match with `errors.Is`; all mean "not authenticated".
+- **Replay.** An ID token is a bearer credential until `exp`. Exchange it for a
+  short-lived token of your own, and track `jti` if a replay inside that window
+  matters.
 
 ## Security posture
 

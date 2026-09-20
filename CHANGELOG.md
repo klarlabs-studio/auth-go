@@ -7,6 +7,45 @@ breaking changes bump the minor version).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-20
+
+### Added
+
+- **`oidc` — an OpenID Connect ID-token verifier** for tokens issued by a third
+  party, so a CI job or workload can authenticate with a short-lived ID token
+  instead of a stored secret. stdlib only; no new dependency.
+
+  `oidc.New(Config)` builds a `Verifier` for one issuer. It discovers
+  `jwks_uri` from `{issuer}/.well-known/openid-configuration` (the document's
+  `issuer` must match exactly; HTTPS required, no redirects, 1 MiB cap) and
+  caches the key set for its `Cache-Control: max-age`, clamped to
+  [5 min, 24 h]. An unknown `kid` refetches, single-flight and at most once
+  per 30 s; a failed refetch keeps the last good set serving, bounded by
+  `MaxStale` (default 24 h, measured from the last successful fetch) — past it
+  verification fails with `ErrKeySetUnavailable` until a refetch succeeds, so
+  a revoked key cannot stay trusted just because its JWKS endpoint is
+  unreachable.
+
+  `Verify` parses strictly — canonical base64url only, no duplicate JSON
+  members, `kid` required, `crit` refused, keys never taken from the token —
+  checks `alg` against an allow-list (default RS256; `none` and HS* cannot be
+  configured) and against the key's `kty`/curve/`alg`, then the signature,
+  `iss` (exact), `aud`, and `exp`/`iat`/`nbf` with 60 s skew. It returns typed
+  registered claims plus the raw claim map (numbers as `json.Number`). Errors
+  are typed: `ErrMalformed`, `ErrAlgorithm`, `ErrUnknownKey`, `ErrSignature`,
+  `ErrIssuer`, `ErrAudience`, `ErrExpired`, `ErrNotYetValid`,
+  `ErrMissingClaim`, `ErrKeySetUnavailable`.
+
+  `oidc.GitHubActions(audience)` is the GitHub Actions profile (issuer
+  `https://token.actions.githubusercontent.com`, RS256, `sub` and `jti`
+  required), and `ParseGitHubActionsClaims` returns `repository_id` and
+  `repository_owner_id` as integers alongside `repository`, `ref`, `sha`,
+  `event_name`, `job_workflow_ref` and `runner_environment`. Authorise on the
+  numeric IDs: names can be renamed and re-registered by someone else.
+
+  Filed for Glossa, whose CI authenticates with GitHub Actions OIDC; the gap is
+  filled here rather than in the product.
+
 ## [0.7.2] - 2026-08-29
 
 ### Fixed
@@ -204,7 +243,11 @@ cryptographic primitives were already sound; each change here closes a
 - Initial release: the auth bounded context with strict DDD layout — magic
   links, password + TOTP, passkeys (WebAuthn), and server-side sessions.
 
-[Unreleased]: https://github.com/klarlabs-studio/auth-go/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/klarlabs-studio/auth-go/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/klarlabs-studio/auth-go/compare/v0.7.2...v0.8.0
+[0.7.2]: https://github.com/klarlabs-studio/auth-go/compare/v0.7.1...v0.7.2
+[0.7.1]: https://github.com/klarlabs-studio/auth-go/compare/v0.7.0...v0.7.1
+[0.7.0]: https://github.com/klarlabs-studio/auth-go/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/klarlabs-studio/auth-go/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/klarlabs-studio/auth-go/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/klarlabs-studio/auth-go/compare/v0.3.0...v0.4.0
