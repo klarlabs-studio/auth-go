@@ -7,6 +7,8 @@ breaking changes bump the minor version).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-20
+
 ### Added
 
 - **`oidc` — an OpenID Connect ID-token verifier** for tokens issued by a third
@@ -241,7 +243,11 @@ cryptographic primitives were already sound; each change here closes a
 - Initial release: the auth bounded context with strict DDD layout — magic
   links, password + TOTP, passkeys (WebAuthn), and server-side sessions.
 
-[Unreleased]: https://github.com/klarlabs-studio/auth-go/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/klarlabs-studio/auth-go/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/klarlabs-studio/auth-go/compare/v0.7.2...v0.8.0
+[0.7.2]: https://github.com/klarlabs-studio/auth-go/compare/v0.7.1...v0.7.2
+[0.7.1]: https://github.com/klarlabs-studio/auth-go/compare/v0.7.0...v0.7.1
+[0.7.0]: https://github.com/klarlabs-studio/auth-go/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/klarlabs-studio/auth-go/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/klarlabs-studio/auth-go/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/klarlabs-studio/auth-go/compare/v0.3.0...v0.4.0
