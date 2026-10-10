@@ -2,10 +2,11 @@ module github.com/klarlabs-studio/auth-go
 
 go 1.26.0
 
-// Go 1.26.6 fixes GO-2026-6218 (net/url), GO-2026-6090 (crypto/tls) and
+// Go 1.26.9 fixes GO-2026-6603..6617 (net/http, net/textproto, crypto/tls),
+// on top of 1.26.6's GO-2026-6218 (net/url), GO-2026-6090 (crypto/tls) and
 // GO-2026-5972 (encoding/asn1); the go directive stays at 1.26.0 so callers
 // aren't forced to move.
-toolchain go1.26.6
+toolchain go1.26.9
 
 require (
 	github.com/go-webauthn/webauthn v0.17.4
