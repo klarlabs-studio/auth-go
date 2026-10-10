@@ -41,6 +41,10 @@ middleware/
 oidc/                OIDC ID-token Verifier for third-party issuers (stdlib only):
                      discovery, cached JWKS, strict JWS; GitHub Actions profile
 
+oauth/               relying-party browser sign-in (stdlib only): authorization
+                     code + PKCE (S256) + state sealed in an AES-GCM cookie;
+                     GitHub profile (verified primary e-mail from /user/emails)
+
 example/
   human/             runnable human auth walkthrough (go run ./example/human)
   workload/          runnable workload identity walkthrough (go run ./example/workload)
@@ -64,6 +68,7 @@ trace propagation.
 | Passkeys | `adapters/webauthn` | WebAuthn; HMAC-signed ceremony state (`StateKey`); kept an adapter so the core carries only `x/crypto` |
 | Workload keys | `domain.WorkloadKeyService` | scoped API keys for agent workers — 256-bit token (stdlib only), only the SHA-256 hash stored, `resource:action` scopes with `tools:*` wildcards, issue/validate/authorize/revoke; rotate atomic on all first-party adapters (`AtomicRotator`) |
 | Basic auth | `middleware.BasicAuthMiddleware` | bootstrap-then-session handshake; `Basic` once, session cookie after — fits browser SPAs |
+| Sign in with GitHub | `oauth.GitHub` + `oauth.StateSealer` | authorization code flow with state and PKCE; identity = immutable numeric user ID + verified primary e-mail; unverified primary refused |
 | OIDC ID tokens | `oidc.Verifier` | verify ID tokens from an external issuer (GitHub Actions, cloud workload identity): discovery, cached JWKS with rotation, RS/PS/ES only; `oidc.GitHubActions` profile |
 
 ## Example
@@ -178,6 +183,47 @@ same way through `oidc.Config{Issuer, Audiences, Algorithms, ...}`.
 - **Replay.** An ID token is a bearer credential until `exp`. Exchange it for a
   short-lived token of your own, and track `jti` if a replay inside that window
   matters.
+
+## Sign in with GitHub (browser login)
+
+`oauth` is the relying-party half of a browser sign-in. It ends in a verified
+identity; the product then finds or creates its user and issues a session with
+`SessionService` as for any other method.
+
+```go
+gh, _ := oauth.NewGitHub(oauth.GitHubConfig{
+    ClientID: id, ClientSecret: secret,                    // an OAuth App; secret from env, never the DB
+    RedirectURL: "https://app.example/auth/github/callback", // registered on the app, exactly
+})
+sealer, _ := oauth.NewStateSealer(stateKey, 0)            // 32-byte key; 10-minute TTL
+
+// GET /auth/github: start
+st, authURL, _ := gh.Begin("", time.Now())
+cookie, _ := sealer.Seal(st)  // HttpOnly, Secure, SameSite=Lax, Max-Age=sealer.TTL(), Path=/auth/github
+http.Redirect(w, r, authURL, http.StatusFound)
+
+// GET /auth/github/callback: finish
+if err := oauth.CallbackError(r.URL.Query()); err != nil { /* declined */ }
+st, err := sealer.Open(cookieValue, r.URL.Query().Get("state"), time.Now()) // ErrState on CSRF/replay/expiry
+id, err := gh.Complete(ctx, st, r.URL.Query().Get("code")) // ErrExchange, ErrUnverifiedEmail, ErrProvider
+// key the account on id.UserID (immutable), never id.Login; id.Email is GitHub-verified
+```
+
+- **CSRF and code injection.** `state` is 256 random bits, compared in
+  constant time against the sealed cookie, which expires; the PKCE verifier
+  (S256) means a code intercepted on its way back cannot be exchanged
+  without the browser's cookie. Clear the cookie after the callback.
+- **Identity.** `Complete` reads `/user` and `/user/emails` and returns the
+  primary address only if GitHub marks it verified (`ErrUnverifiedEmail`
+  otherwise — a secondary verified address is not substituted). Match
+  returning users on `UserID`; logins are renamed and re-registered.
+- **Account linking.** Never merge an existing account into a GitHub sign-in
+  because the e-mail matches: link a second method only from inside the
+  signed-in account.
+- **Token handling.** The access token is used for the two reads and
+  dropped; it is not returned or logged. Requests are HTTPS-only, refuse
+  redirects (the client secret is never replayed elsewhere), and cap
+  responses at 1 MiB. Provider error descriptions are not echoed.
 
 ## Security posture
 
