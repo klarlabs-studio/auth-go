@@ -7,6 +7,22 @@ breaking changes bump the minor version).
 
 ## [Unreleased]
 
+### Added
+
+- **`oauth` — sign in with GitHub in the browser.** The relying-party half of
+  the authorization code flow, stdlib only: `NewLoginState` (256-bit state and
+  a PKCE verifier), `PKCEChallenge` (S256, RFC 7636 vector tested),
+  `StateSealer` (AES-256-GCM cookie with an expiry; `Open` checks it against
+  the echoed state in constant time, `ErrState` on forgery, tampering,
+  mismatch or expiry), `CallbackError`, and the GitHub profile:
+  `NewGitHub(GitHubConfig)`, `Begin`, `AuthCodeURL`, and `Complete`, which
+  exchanges the code with the verifier and returns a `GitHubIdentity` — the
+  immutable numeric user ID, login, name and the **verified primary** e-mail
+  from `/user/emails` (`ErrUnverifiedEmail` otherwise). HTTPS only (except
+  `AllowInsecureHTTPHosts` for tests), redirects refused, responses capped at
+  1 MiB; the access token is dropped after the reads and never returned.
+  GitHub Enterprise Server works through the endpoint fields.
+
 ## [0.8.0] - 2026-09-20
 
 ### Added
