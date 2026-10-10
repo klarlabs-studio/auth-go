@@ -7,6 +7,8 @@ breaking changes bump the minor version).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-10
+
 ### Added
 
 - **`oauth` — sign in with GitHub in the browser.** The relying-party half of
@@ -259,7 +261,8 @@ cryptographic primitives were already sound; each change here closes a
 - Initial release: the auth bounded context with strict DDD layout — magic
   links, password + TOTP, passkeys (WebAuthn), and server-side sessions.
 
-[Unreleased]: https://github.com/klarlabs-studio/auth-go/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/klarlabs-studio/auth-go/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/klarlabs-studio/auth-go/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/klarlabs-studio/auth-go/compare/v0.7.2...v0.8.0
 [0.7.2]: https://github.com/klarlabs-studio/auth-go/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/klarlabs-studio/auth-go/compare/v0.7.0...v0.7.1
